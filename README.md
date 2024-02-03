@@ -22,7 +22,7 @@ These instructions will get you a copy of the project up and running on your loc
 ### Install with pip
 
 ```bash
-pip install requirments.txt
+pip install -r requirments.txt
 ```
 
 ### Getting dataset for classifier
