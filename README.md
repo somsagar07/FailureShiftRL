@@ -2,6 +2,8 @@
 
 Briefly describe your project here. Explain what it does and why it is useful. Highlight the machine learning tasks it addresses, such as classification, generation, summarization, and reinforcement learning (RL).
 
+> **Note:** In this branch, we use Jupyter Notebook (`.ipynb`) files exclusively to enhance code interactivity and better understanding.
+
 ## Structure
 
 This project is organized into several key directories:
@@ -16,6 +18,7 @@ This project is organized into several key directories:
 ## Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine for development and testing purposes.
+
 
 ### Prerequisites
 
