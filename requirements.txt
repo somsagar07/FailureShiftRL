@@ -1,0 +1,14 @@
+torch
+torchvision
+gym
+stable-baselines3[extra]
+plotly
+keras
+pytest-shutil
+openai-clip
+transformers
+accelerate
+diffusers
+datasets
+opencv-python
+scipy
