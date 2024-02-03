@@ -12,3 +12,11 @@ diffusers
 datasets
 opencv-python
 scipy
+kaggle
+matplotlib
+nltk
+numpy
+pandas
+Pattern
+sacrebleu
+pillow
