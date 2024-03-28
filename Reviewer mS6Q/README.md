@@ -2,7 +2,7 @@
 To navigate the intricacies of multiple failure modes, our methodology integrates a human-in-the-loop component. This aspect is crucial for prioritizing and deciding on the order in which to address different failure modes. By leveraging human expertise, we can make informed decisions about which failures to fine-tune first, based on their potential impact, interdependencies, and the overall goals of the system. As given in the following image (or Fig 10. (Alexnet) Appendix) the pretrained had two failure modes but fine tuning on the sample chosen by a human reduced both failure modes.
 
 <p align="center">
-  <img src="../images/figure5.png" alt="Probability distribution of actions for AlexNet">
+  <img src="../images/figure5.png" style="width:50%;" alt="Probability distribution of actions for AlexNet">
   <br>
   <em>Figure 1: Probability distribution of actions for AlexNet</em>
 </p>
