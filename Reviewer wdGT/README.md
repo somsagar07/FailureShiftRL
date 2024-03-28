@@ -39,3 +39,5 @@ We also evaluated the scalability of our approach by increasing the action space
   <br>
   <em>Figure 3: Scalability assessment, demonstrating that computational time increases non-exponentially as the action space expands.</em>
 </p>
+
+## Uncertainty estimation in failure mode 
