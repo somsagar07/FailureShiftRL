@@ -41,3 +41,9 @@ We also evaluated the scalability of our approach by increasing the action space
 </p>
 
 ## Uncertainty estimation in failure mode 
+
+We extended our research to assess uncertainties within a particular failure mode by employing an ensemble method. Specifically, we applied this method to the failure mode that exhibited the highest mean and the lowest standard deviation. The findings are as follows:
+
+<!--Image of uncertainity in failure modes-->
+
+We observe uncertainties within the samples of the failure mode, providing insights into which class exhibits the most uncertainties and may be the potential cause of failure.
