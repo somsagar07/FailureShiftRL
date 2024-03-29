@@ -1,4 +1,4 @@
-### Q1. How does one specify the search-space constraints C? For instance, in an image setting, it is not clear to me how to define abstract concepts.
+## Q1. How does one specify the search-space constraints C? For instance, in an image setting, it is not clear to me how to define abstract concepts.
 If we think about any audit process, whether it is in AI or not, we typically have to start with some constraints (or concepts) C. Given the **infinite number of possible constraints**, domain knowledge is important for narrowing down the search space and specifying constraints. As any method has assumptions and constraints, we aim to **pragmatically balance narrowing down the search space while automating the failure search framework as much as possible**. Before testing any model, users must know why they need to test the model. If we approach the problem from the application's perspective, constraints often emerge organically, though the complexity of specifying these constraints can vary:
 
 - **Straightforward specifications:** Consider the task of detecting airplanes on ground at an airport from a surveillance aircraft flying above. The engineers' objective is to identify the physical conditions under which the model fails to detect planes. Potential constraints may include environmental factors such as darkness levels and physical conditions such as the angle of observation (i.e., rotation). Specifying constraints in such scenarios is relatively straightforward, involving operations such as changing darkness or rotation.
@@ -9,7 +9,7 @@ In the long run, it might be possible to transfer knowledge from one testing cas
 
 
 
-### Q2. How does one choose the reward function R without ad-hoc human feedback? I do not see how the approach could identify regions of failure without a pre-constructed data set, for which an adaptive search would be impossible.
+## Q2. How does one choose the reward function R without ad-hoc human feedback? I do not see how the approach could identify regions of failure without a pre-constructed data set, for which an adaptive search would be impossible.
 example, we did not rely on human feedback to learn a reward at the end.
 
  **Since AI feedback was similar to human feedback (refer to Appendix F) in the image generation example, we did not have to rely on human feedback "to learn a reward" at the end.**
@@ -29,12 +29,12 @@ Identifying potential failures presents a significant challenge due to the vastn
 
 
 
-### Q3. The work uses CLIP embeddings to construct a reward function for image data. Did you observe "double failures", i.e., a failure of the reward function to identify failures of the analyzed functions?
+## Q3. The work uses CLIP embeddings to construct a reward function for image data. Did you observe "double failures", i.e., a failure of the reward function to identify failures of the analyzed functions?
 Our analysis did not specifically uncover instances where the reward function was based on CLIP embeddings. As shown in Figure 29, the action distribution obtained from the human feedback is similar to that of CLIP embeddings (Wasserstein distance of 0.0011). The blue and orange plots are human and CLIP, respectively (apologize for the incorrect legend).
 
 
 
-### Q4. How much human interaction is necessary to find a good amount of failure cases?
+## Q4. How much human interaction is necessary to find a good amount of failure cases?
  Reminding the answer to Q2, we mention two types of human interactions in the paper:
 1. In all experiments we only needed between 1 to 4 human interactions for failure mitigation 
 2. To learn the reward function in section 2.3.2, “1000 instances of human feedback were collected over all 100 episodes” (line 243-244 of the paper). Considering the abstractness of the measurement (e.g., quality and social bias), we believe it is efficient. 
@@ -43,7 +43,7 @@ We would like to reiterate that human feedback for learning rewards is only need
 
 
 
-### Q5. How effective is the fine-tuning? I can imagine that a large region of failure cases might require a substantial adaptation of the model, which is tricky to fine-tune without catastrophic forgetting. Your proposed last-layer fine-tuning may not be sufficient in this case. Maybe it would be useful to interface with existing approaches.
+## Q5. How effective is the fine-tuning? I can imagine that a large region of failure cases might require a substantial adaptation of the model, which is tricky to fine-tune without catastrophic forgetting. Your proposed last-layer fine-tuning may not be sufficient in this case. Maybe it would be useful to interface with existing approaches.
 
 For classification models, we used final layer fine-tuning and for stable diffusion we used LoRA: 
 
@@ -54,8 +54,8 @@ Since adaptive learning rates are used in Adam and other SGD techniques, a littl
 
 
 
-### Q6. Adversarial training may already mitigate some failure cases. Have you analyzed how much of the failure cases could already be mitigated through adversarial training?
-## Q6. 
+## Q6. Adversarial training may already mitigate some failure cases. Have you analyzed how much of the failure cases could already be mitigated through adversarial training?
+
 The better the ML model is trained, the easier it is for our RL algorithm to find failures as the RL algorithm receives clean and less confusing rewards from such models. Therefore, **an adversarially trained ML model is a blessing.** 
 
 Following the reviewer’s suggestions, we have added an experiment to implement adversarial training, utilizing Fast Gradient Sign Method (FGSM) samples to enhance the model's resilience. However, consistent with our prior observations, we identified vulnerabilities within the adversarially trained model. This led us to an essential hypothesis: it is crucial to initiate with a “summarize phase,” which aims to delineate all potential failure modes before undertaking the reconstruction of the model's decision boundary to enhance robustness.
@@ -84,7 +84,7 @@ Even when model is trained on adversarial samples and tested against the same ad
 
 
 
-### Q7. Is there some way you can categorize the observed failure cases?
+## Q7. Is there some way you can categorize the observed failure cases?
 Failures are already classified on the bases of action space as seen in **Fig 2** of the paper. Please refer to the **Appendix E.5** to see additional failure modes on different models. Also, each mode clearly defines a distinct mean and standard deviation. This categorization based on action space helps with making further actions in the downstream applications (e.g., legislative bodies or engineers).
 
 As for the weakness specified we use both count and entropy metrics, capitalizing on count's effectiveness in our **discrete action space** with binary outcomes(fail or not fail) and employing entropy to quantify decision-making randomness, ensuring a robust evaluation.
