@@ -34,7 +34,7 @@ We also **implemented a deep ensemble** for the AlexNet and fed in sample from t
   <br>
   <em>Figure 3: Deep ensemble for the AlexNet for most and least likely samples from the failure modes.</em>
 </p>
-
+In the above image Y axis Mean refers to mean of softmax scores of AlexNet.
 
 ## Q3. In general, it seems like the success of this method would depend significantly upon the exploration technique (Macroscopic and Microscopic exploration). Can you provide more details about how the exploration phases were decided, as well as a discussion of other exploration techniques which could be considered? 
 
