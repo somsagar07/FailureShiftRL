@@ -18,7 +18,7 @@ If the new failure mode is important, we can fine-tune again. Being able to **it
 </p>
 
 
-### Q2. Have you explored alternative ways to deal with catastrophic forgetting when fine-tuning?
+## Q2. Have you explored alternative ways to deal with catastrophic forgetting when fine-tuning?
 
 As part of our fine-tuning protocol, we apply the action derived from the fine-tuning process to the **data only 50% of the time**. This approach is designed to balance the introduction of new learning with the retention of previously acquired knowledge. By not applying the fine-tuning action universally across all data, we reduce the risk of the model completely "forgetting" its earlier learning due to the overpowering influence of the new data or adjustments. For a detailed explanation of this technique and its underlying rationale for other parameters used while fine-tuning please refer Section 4, where we elaborate on the experimental setup and the specific parameters used.
 
