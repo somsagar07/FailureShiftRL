@@ -10,9 +10,7 @@ In the long run, it might be possible to transfer knowledge from one testing cas
 
 
 ## Q2. How does one choose the reward function R without ad-hoc human feedback? I do not see how the approach could identify regions of failure without a pre-constructed data set, for which an adaptive search would be impossible.
-example, we did not rely on human feedback to learn a reward at the end.
-
- **Since AI feedback was similar to human feedback (refer to Appendix F) in the image generation example, we did not have to rely on human feedback "to learn a reward" at the end.**
+**Since AI feedback was similar to human feedback (refer to Appendix F) in the image generation example, we did not have to rely on human feedback "to learn a reward" at the end.**
 
 Please note that the paper mentions two types of human feedback: 
 1. Relatively inexpensive human feedback, involving 1-4 human inputs, utilized to mitigate failures in all experiments, as outlined in the failure summary report discussed in Section 3, and 
@@ -30,9 +28,13 @@ Identifying potential failures presents a significant challenge due to the vastn
 
 
 ## Q3. The work uses CLIP embeddings to construct a reward function for image data. Did you observe "double failures", i.e., a failure of the reward function to identify failures of the analyzed functions?
-Our analysis did not specifically uncover instances where the reward function was based on CLIP embeddings. As shown in Figure 29, the action distribution obtained from the human feedback is similar to that of CLIP embeddings (Wasserstein distance of 0.0011). The blue and orange plots are human and CLIP, respectively (apologize for the incorrect legend).
+Our analysis did not specifically uncover instances where the reward function was based on CLIP embeddings. As shown in Figure 1 (or Figure 29 of Appendix), the action distribution obtained from the human feedback is similar to that of CLIP embeddings (Wasserstein distance of 0.0011). The blue and orange plots are human and CLIP, respectively (apologize for the incorrect legend in Appendix).
 
-
+<p align="center">
+  <img src="../images/figure11.jpeg" alt="">
+  <br>
+  <em>Figure 1: This chart illustrates the similarity between the probability distributions of rewards based on CLIP embeddings and those derived from human feedback,with a Wasserstein distance of 0.0011 indicating a close match.</em>
+</p>
 
 ## Q4. How much human interaction is necessary to find a good amount of failure cases?
  Reminding the answer to Q2, we mention two types of human interactions in the paper:
@@ -63,28 +65,27 @@ Following the reviewer’s suggestions, we have added an experiment to implement
 <p align="center">
   <img src="../images/figure9.jpg" alt="Failure landscape and search on adversarially trained model.">
   <br>
-  <em>Figure 1: Failure landscape and search on adversarially trained model</em>
+  <em>Figure 2: Visualization of failure landscape and search on adversarially trained model</em>
 </p>
 <p align="center">
   <img src="../images/figure7.png" style="width:50%;" alt="Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.">
   <br>
-  <em>Figure 2: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.</em>
+  <em>Figure 3: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.</em>
 </p>
 
-Our analysis revealed that while adversarial training techniques like FGSM enhance model robustness, they primarily do so by altering samples close to the decision boundary. This phenomenon is evident from the above figure where points near the original image coordinate (0, 0, 0) exhibit greater resilience to failure compared to those positioned further away. Despite the relative safety of nearby perturbations, we discovered that the model remains susceptible to failures at more distant points, as exemplified by the instance marked with a yellow circle at the coordinate (3, 4, 4).
+Our analysis revealed that while adversarial training techniques like FGSM enhance model robustness, they primarily do so by altering samples close to the decision boundary. This phenomenon is evident from the Figure 3 where points near the original image coordinate (0, 0, 0) exhibit greater resilience to failure compared to those positioned further away. Despite the relative safety of nearby perturbations, we discovered that the model remains susceptible to failures at more distant points, as exemplified by the instance marked with a yellow circle at the coordinate (3, 4, 4).
 
 <p align="center">
   <img src="../images/figure8.png" style="width:50%;" alt="Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.">
   <br>
-  <em>Figure 3: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and FGSM actions.</em>
+  <em>Figure 4: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and FGSM actions.</em>
 </p>
 
-
-Even when model is trained on adversarial samples and tested against the same adversarial attack we notice even though the models becomes more resilient to the adversarial samples there might be more samples which the model is more likely to fail as shown in the above figure at which furthers our hypothesis that a summarize step is needed before reconstruction of the decision boundary.
+Even when model is trained on adversarial samples and tested against the same adversarial attack we notice even though the models becomes more resilient to the adversarial samples there might be more samples which the model is more likely to fail (as shown in Figure 4) at which furthers our hypothesis that a summarize step is needed before reconstruction of the decision boundary.
 
 
 
 ## Q7. Is there some way you can categorize the observed failure cases?
 Failures are already classified on the bases of action space as seen in **Fig 2** of the paper. Please refer to the **Appendix E.5** to see additional failure modes on different models. Also, each mode clearly defines a distinct mean and standard deviation. This categorization based on action space helps with making further actions in the downstream applications (e.g., legislative bodies or engineers).
 
-As for the weakness specified we use both count and entropy metrics, capitalizing on count's effectiveness in our **discrete action space** with binary outcomes(fail or not fail) and employing entropy to quantify decision-making randomness, ensuring a robust evaluation.
+As for the weakness specified we use both count and entropy metrics, capitalizing on count's effectiveness in our **discrete action space** with binary outcomes (fail or not fail) and employing entropy to quantify decision-making randomness, ensuring a robust evaluation.
