@@ -44,14 +44,20 @@ Since adaptive learning rates are used in Adam and other SGD techniques, a littl
 
 
 ### Q6. Adversarial training may already mitigate some failure cases. Have you analyzed how much of the failure cases could already be mitigated through adversarial training?
-The better the ML model is trained, the easier it is for our RL algorithm to find failures as the RL algorithm receives clean and less confusing rewards from such models. Therefore, an adversarially trained ML model is a blessing.
+The better the ML model is trained, the easier it is for our RL algorithm to find failures as the RL algorithm receives clean and less confusing rewards from such models. Therefore, an adversarially trained ML model is a blessing. Figure 1 shows how adversarially trained model can have better decision boundaries but can still have failure cases.
+
+<p align="center">
+  <img src="../images/figure9.jpg" alt="Failure landscape and search on adversarially trained model.">
+  <br>
+  <em>Figure 1: Failure landscape and search on adversarially trained model</em>
+</p>
 
 Following the reviewer’s suggestions, we have added an experiment to implement adversarial training, utilizing Fast Gradient Sign Method (FGSM) samples to enhance the model's resilience. However, consistent with our prior observations, we identified vulnerabilities within the adversarially trained model. This led us to an essential hypothesis: it is crucial to initiate with a “summarize phase,” which aims to delineate all potential failure modes before undertaking the reconstruction of the model's decision boundary to enhance robustness.
 
 <p align="center">
   <img src="../images/figure7.png" style="width:50%;" alt="Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.">
   <br>
-  <em>Figure 1: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.</em>
+  <em>Figure 2: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.</em>
 </p>
 
 Our analysis revealed that while adversarial training techniques like FGSM enhance model robustness, they primarily do so by altering samples close to the decision boundary. This phenomenon is evident from the provided graph, where points near the original image coordinate (0, 0, 0) exhibit greater resilience to failure compared to those positioned further away. Despite the relative safety of nearby perturbations, we discovered that the model remains susceptible to failures at more distant points, as exemplified by the instance marked with a yellow circle at the coordinate (3, 4, 4).
@@ -59,7 +65,7 @@ Our analysis revealed that while adversarial training techniques like FGSM enhan
 <p align="center">
   <img src="../images/figure8.png" style="width:50%;" alt="Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and saturation actions.">
   <br>
-  <em>Figure 2: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and FGSM actions.</em>
+  <em>Figure 3: Failure landscape of AlexNet (Adversarially trained on FGSM) with rotation, darkening and FGSM actions.</em>
 </p>
 
 Even when model is trained on adversarial samples and tested against the same adversarial attack we notice even though the models becomes more resilient to the adversarial samples there might be more samples which the model is more likely to fail (as shown in this graph) at which furthers our hypothesis that a summarize step is needed before reconstruction of the decision boundary.
