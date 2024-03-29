@@ -29,8 +29,12 @@ We attempted to use BayesOPT for our analysis, but encountered issues due to dep
 
 We also **implemented a deep ensemble** for the AlexNet and fed in sample from the failure modes. Yes, samples from failure models reported high variance in deep ensembles. Note that the converse is not true---the deep ensemble would provide a high predictive variance even for regions that never fails, if the ensemble has never seen data in that region.
 
-
-
+<p align="center">
+  <img src="../images/figure10.jpeg" alt="Deep ensemble for the AlexNet">
+  <br>
+  <em>Figure 3: Deep ensemble for the AlexNet for most and least likely samples from the failure modes.</em>
+</p>
+In the above image Y axis Mean refers to mean of softmax scores of AlexNet.
 
 ## Q3. In general, it seems like the success of this method would depend significantly upon the exploration technique (Macroscopic and Microscopic exploration). Can you provide more details about how the exploration phases were decided, as well as a discussion of other exploration techniques which could be considered? 
 
