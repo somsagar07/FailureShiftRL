@@ -1,9 +1,6 @@
-# FailureShiftRL
+# Failures Are Fated, But Can Be Faded
 
 We introduce a smart way to test and improve deep learning models using reinforcement learning (RL). It's designed to identify where the model performs well and where it fails by examining its action space This is useful because it helps us understand the model's strengths and weaknesses, ensuring it makes better decisions or predictions. We use this method to systematically explore different scenarios, determining how confident we can be in the model's success or failure in each. Based on this feedback, we focus on enhancing the model this could involve adjusting it to avoid certain errors or to perform better in areas that users deem important. The tasks our project tackles include imagee classification, text to image generation and text summarization.
-
-
-> **Note:** In this branch, we use Jupyter Notebook (`.ipynb`) files exclusively to enhance code interactivity and better understanding.
 
 ## Structure
 
