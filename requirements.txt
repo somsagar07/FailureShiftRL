@@ -20,3 +20,4 @@ pandas
 Pattern
 sacrebleu
 pillow
+tqdm
