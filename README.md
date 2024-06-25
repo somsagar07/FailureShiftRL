@@ -44,7 +44,7 @@ pip install -r requirments.txt
 ### Getting dataset for classifier
 After installing the necessary requirements, if you need to get the dataset used for the classification task, you need to run the `dataset.py` located in the `Utils` folder. This script will download and prepare the dataset in `./Dataset/classification` folder.
 
-> [!NOTE]
+> [!IMPORTANT]
 > We are using kaggle to download the dataset and you need set the API key before you download the dataset. You can follow [this link](https://www.kaggle.com/docs/api) for instructions on how to create and generate your API key.
 
 ## Important Information
