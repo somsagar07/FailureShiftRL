@@ -1,9 +1,9 @@
 # Failures Are Fated, But Can Be Faded
 
-As models become more competent across various domains, our understanding of their capabilities and limitations becomes increasingly murky. Blindly mitigating failures often leads to even more failures. We introduce a reinforcement learning (RL) based framework to characterize the failure landscape of the model in question and use this information to improve the model further. We also tested this framework across different settings, including image **classification**, text-to-image **generation**, and text **summarization**. Our results show that our framework can effectively be used to identify the model's strengths and weaknesses and provide a roadmap for further improving the model's performance.
+<p align="justify">As models become more competent across various domains, our understanding of their capabilities and limitations becomes increasingly murky. Blindly mitigating failures often leads to even more failures. We introduce a reinforcement learning (RL) based framework to characterize the failure landscape of the model in question and use this information to improve the model further. We also tested this framework across different settings, including image **classification**, text-to-image **generation**, and text **summarization**. Our results show that our framework can effectively be used to identify the model's strengths and weaknesses and provide a roadmap for further improving the model's performance.</p>
 
 ![alt text](<./assets/image 1.jpg>)
-Our framework for failure discovery and mitigation involves three steps: Discover, Summarize, and Restructure. First, deep RL is applied to explore the failure landscape and identify regions where models might fail. Second, these results are summarized and presented to the user for action. Third, based on user feedback improvement takes place. As shown with the case of image generation,, after fine tuning model generated more human aligned images.
+<p align="justify">Our framework for failure discovery and mitigation involves three steps: Discover, Summarize, and Restructure. First, deep RL is applied to explore the failure landscape and identify regions where models might fail. Second, these results are summarized and presented to the user for action. Third, based on user feedback improvement takes place. As shown with the case of image generation,, after fine tuning model generated more human aligned images.</p>
 
 ## Project Structure
 
@@ -16,7 +16,6 @@ This project is organized into several key directories:
 - `Utils/`: Contains code to download and prepare classification dataset and other plotting functions.
 
 ## Getting Started
-
 These instructions will get your copy of the project up and running on your local machine for development and testing purposes.
 
 ### Create a virtual environment
