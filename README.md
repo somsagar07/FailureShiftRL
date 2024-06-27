@@ -38,7 +38,7 @@ Now, using the default command prompt (cmd), run the following command to activa
 Now, install the required packages using the following command in the activated virtual environment:
 
 ```bash
-pip install -r requirments.txt
+pip install -r requirements.txt
 ```
 
 ### Getting dataset for classifier
