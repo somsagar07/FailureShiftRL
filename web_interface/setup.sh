@@ -7,7 +7,7 @@ if [[ ! -x .venv/bin/python ]]; then
 fi
 
 printf 'Installing the web interface requirements into %s/.venv\n' "$PWD"
-# Use CPU wheels for this CPU-only viewer instead of pulling CUDA runtimes.
+# Use CPU wheels by default. An existing supported CUDA PyTorch is retained.
 if ! .venv/bin/python -I -c 'import torch; assert (2,6) <= tuple(map(int, torch.__version__.split(".")[:2])) < (3,0)' >/dev/null 2>&1; then
   if ! .venv/bin/python -I -m pip install --disable-pip-version-check --no-input --retries 1 --timeout 20 --index-url https://download.pytorch.org/whl/cpu 'torch>=2.6,<3'; then
     printf '\nCould not install CPU PyTorch. Check internet access, then rerun: bash setup.sh\n' >&2

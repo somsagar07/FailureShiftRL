@@ -12,10 +12,13 @@ def check_environment(quiet=False):
         ('datasets', 'datasets', ('Image', 'Dataset', 'load_dataset')),
         ('numpy', 'numpy', ('linalg', 'array')),
         ('torch', 'torch', ('inference_mode', 'Tensor')),
-        ('transformers', 'transformers', ('AutoImageProcessor', 'AutoModel', 'AutoTokenizer', 'AutoModelForSeq2SeqLM', 'CLIPTextModel', 'CLIPTokenizer')),
+        ('transformers', 'transformers', ('AutoImageProcessor', 'AutoModel', 'AutoTokenizer', 'AutoModelForSeq2SeqLM', 'AutoModelForImageClassification', 'AutoModelForSequenceClassification', 'CLIPModel', 'CLIPTextModel', 'CLIPTokenizer')),
         ('sentencepiece', 'sentencepiece', ('SentencePieceProcessor',)),
         ('protobuf', 'google.protobuf', ('__version__',)),
         ('ftfy', 'ftfy', ('fix_text',)),
+        ('diffusers', 'diffusers', ('StableDiffusionPipeline', 'DDPMScheduler')),
+        ('peft', 'peft', ('LoraConfig', 'get_peft_model_state_dict')),
+        ('accelerate', 'accelerate', ('Accelerator',)),
     )
     failures = []
     if not quiet:

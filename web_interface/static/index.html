@@ -8,6 +8,7 @@
   <script src="/graph.js" defer></script>
   <script src="/embedding-view.js" defer></script>
   <script src="/embedding-controller.js" defer></script>
+  <script src="/discovery-controller.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -103,7 +104,7 @@
               <button id="embedding-zoom-out" type="button" aria-label="Zoom out in 3D">−</button>
               <button id="embedding-zoom-in" type="button" aria-label="Zoom in 3D">+</button>
               <button id="embedding-fit" type="button">Fit</button>
-              <button id="find-failure" type="button" disabled title="Failure discovery will be added later.">Find failure</button>
+
             </div>
           </div>
           <canvas id="embedding-canvas" tabindex="0" role="group" aria-label="3D model embedding graph. Drag to rotate, Shift-drag to pan, scroll to zoom. Select inputs and actions using the dropdowns or by clicking points. Arrow keys rotate, plus and minus zoom, zero fits, Escape shows all inputs."></canvas>
@@ -114,9 +115,28 @@
               <select id="embedding-action"></select>
             </div>
             <p id="embedding-meta" class="hint"></p>
+            <div class="discovery-launch"><button id="find-failure" type="button" disabled>Find failure</button></div>
+            <p id="severity-legend" class="hint" hidden><span class="severity-gradient"></span> Low severity → high severity · gray: unevaluated · outlined pulse: current input/action. Original color averages observed pairs only.</p>
             <p class="hint embedding-help">Drag to rotate · Shift-drag to pan · scroll to zoom · click a point to explore</p>
           </div>
         </div>
+        <section id="discovery-panel" class="discovery-panel" hidden aria-label="Failure discovery">
+          <h3>Find failure</h3>
+          <fieldset id="discovery-settings">
+            <div class="compact-row"><label>Episodes <input id="discovery-episodes" type="number" min="1" max="10000" value="100"></label><label>Seed <input id="discovery-seed" type="number" min="0" value="42"></label></div>
+            <div id="discovery-labels"><label for="discovery-label-map">Labels (optional JSON)</label><textarea id="discovery-label-map" rows="2" placeholder='{"0": "cat", "1": 281}'></textarea><p class="hint">Input indices start at 0. Use exact model label names or class IDs; dataset labels are not mapped automatically. Without labels, findings are prediction-change candidates.</p></div>
+            <div id="discovery-summary" hidden><label for="discovery-reference">Human reference summary (required)</label><textarea id="discovery-reference" rows="3"></textarea><label for="discovery-metric">Summary review metric</label><select id="discovery-metric"><option value="grounded">Source grounding (NLI) + reference ROUGE-L</option><option value="reference">Fast reference overlap (ROUGE-L)</option></select></div>
+            <p id="discovery-generation" class="hint" hidden>Generates real images and scores prompt/image CLIP alignment with matched noise seeds. This is a review signal, not a demographic bias measurement.</p>
+            <details><summary>Evaluation options</summary><label id="discovery-threshold-field">Quality-drop threshold <input id="discovery-threshold" type="number" min="0" max="1" step="0.01" value="0.15"></label><div id="generation-options" hidden><label>Diffusion steps <input id="discovery-steps" type="number" min="1" max="100" value="12"></label><label>Image size <select id="discovery-size"><option value="256">256</option><option value="512">512</option></select></label></div><label>Device <select id="discovery-device"><option value="cpu">CPU</option><option value="auto">Automatic</option></select></label></details>
+          </fieldset>
+          <div class="job-buttons"><button id="discovery-start" type="button">Start discovery</button><button id="discovery-cancel" type="button" hidden>Cancel discovery</button><button id="finetune-cancel" type="button" hidden>Cancel training</button><button id="discovery-retry" type="button" hidden>Retry status</button></div>
+          <p id="discovery-status" role="status"></p><p id="discovery-error" class="error" role="alert" hidden></p><p id="discovery-metrics" class="hint"></p><p id="discovery-criterion" class="hint"></p>
+          <progress id="discovery-progress" max="100" value="0" hidden></progress>
+          <div id="discovery-artifacts"></div>
+          <div id="discovery-records" hidden><label for="discovery-pair">Inspect a measured input/action</label><select id="discovery-pair"></select></div>
+          <div id="discovery-inspector" hidden><h3>Measured model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">Automated scores are review signals. Unvisited actions have no measured score.</p></div>
+          <details id="finetune-panel" hidden><summary>Fine-tune reviewed examples</summary><p class="hint">Add explicit desired targets for visited actions. Training begins only when you press Start fine-tuning. Metrics describe reviewed training examples; evaluate the saved checkpoint separately.</p><label id="finetune-target-label" for="finetune-target">Desired class ID or exact label</label><textarea id="finetune-target" rows="3"></textarea><button id="finetune-add" type="button">Add selected pair</button><ul id="finetune-examples"></ul><div class="compact-row"><label>Epochs <input id="finetune-epochs" type="number" min="1" max="100" value="1"></label><label>Learning rate <input id="finetune-lr" type="number" min="0.00000001" max="0.1" step="any" value="0.001"></label></div><div class="job-buttons"><button id="finetune-start" type="button" disabled>Start fine-tuning</button></div><p id="finetune-status" role="status"></p><div id="finetune-checkpoint" hidden><label for="finetune-path">Saved local model</label><input id="finetune-path" type="text" readonly><button id="finetune-use" type="button">Select checkpoint for Analyze</button></div></details>
+        </section>
         <div id="graph-wrap" class="graph-wrap" hidden>
           <div class="graph-toolbar">
             <input id="graph-search" type="search" aria-label="Find a combination" placeholder="Find a number or action…">

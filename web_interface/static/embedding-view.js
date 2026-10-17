@@ -54,6 +54,7 @@ class EmbeddingView {
   setData(points) {
     if (this.drag) this.endPointer({type: 'pointercancel', pointerId: this.drag.id});
     this.canvas.title = '';
+    this.discovery=null;this.measured=new Map();this.severities=new Map();
     this.points = points;
     this.nodes = [];
     this.focusIndex = null;
@@ -90,7 +91,28 @@ class EmbeddingView {
     this.render();
   }
 
-  reset() {this.setData([]);}
+  setDiscovery(job) {
+    this.discovery=job;
+    this.measured=new Map();this.severities=new Map();
+    const groups=new Map();
+    for(const record of job?.records||[]) {
+      if(!Number.isFinite(record.severity))continue;
+      this.measured.set(`${record.input_index}:${record.action_id}`,record.severity);
+      const values=groups.get(record.input_index)||[];values.push(record.severity);groups.set(record.input_index,values);
+    }
+    for(const [index,values] of groups)this.severities.set(index,values.reduce((a,b)=>a+b,0)/values.length);
+    this.render();
+    clearTimeout(this.pulseTimer);
+    if(job&&['queued','running'].includes(job.status)&&typeof setTimeout==='function'&&!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)this.pulseTimer=setTimeout(()=>this.setDiscovery(this.discovery),160);
+  }
+
+  severityColor(value) {
+    if(!Number.isFinite(value))return '#9aa1a9';
+    const severity=Math.max(0,Math.min(1,value));
+    return `rgb(${Math.round(47+166*severity)},${Math.round(158-107*severity)},${Math.round(88-36*severity)})`;
+  }
+
+  reset() {clearTimeout(this.pulseTimer);this.setData([]);}
 
   zoom(factor) {
     if (!Number.isFinite(factor) || factor <= 0) return;
@@ -268,13 +290,21 @@ class EmbeddingView {
     for (const node of this.projected) {
       ctx.beginPath();
       ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-      ctx.fillStyle = node.kind === 'sample' ? '#336aa3' : '#b06c36';
+      ctx.fillStyle = this.discovery?this.severityColor(node.kind==='sample'?this.severities.get(node.data.index):this.measured.get(`${this.focusIndex}:${node.data.id}`)):(node.kind === 'sample' ? '#336aa3' : '#b06c36');
       ctx.globalAlpha = this.focusIndex !== null && node.kind === 'sample' && !node.focused ? 0.22 : 1;
       ctx.fill();
       // A light rim separates overlapping points; selection gets a darker border.
       ctx.strokeStyle = node.selected ? '#202a35' : '#ffffff';
       ctx.lineWidth = node.selected ? 2.5 : 1.5;
       ctx.stroke();
+      const current=this.discovery?.current;
+      const active=this.discovery&&['queued','running'].includes(this.discovery.status)&&current&&
+        (node.kind==='sample'?node.data.index===current.input_index:this.focusIndex===current.input_index&&node.data.id===current.action_id);
+      if(active) {
+        const pulse=2+2*(1+Math.sin(Date.now()/220));
+        ctx.beginPath();ctx.arc(node.x,node.y,node.radius+pulse,0,Math.PI*2);
+        ctx.strokeStyle='#203f72';ctx.lineWidth=2;ctx.globalAlpha=0.85;ctx.stroke();
+      }
     }
     ctx.globalAlpha = 1;
   }

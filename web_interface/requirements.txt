@@ -1,4 +1,4 @@
-# Local model embeddings, input previews, and Hugging Face datasets/models.
+# Local analysis, DQN discovery, and reviewed model fine-tuning.
 Pillow>=10,<13
 huggingface_hub>=0.34,<1
 datasets>=3,<5
@@ -8,3 +8,7 @@ transformers>=4.55,<5
 sentencepiece>=0.2,<0.3
 protobuf>=4.25,<7
 ftfy>=6.2,<7
+# Keep the tested SD 1/2 and LoRA APIs compatible with Transformers 4.x.
+diffusers==0.30.3
+peft==0.11.1
+accelerate>=1,<2

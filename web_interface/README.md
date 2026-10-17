@@ -1,10 +1,10 @@
 # failureshiftRL
 
-A local viewer for model embeddings and input combinations across image
-classification, summarization, and image generation. **Analyze** runs the selected
-model's encoder locally and displays a 3D projection. Nodes preview images, edited
-source text, or filled prompts. This version does **not** generate summaries or
-images, compute failure scores, or run an RL loop.
+A local workspace for image classification, summarization, and image generation.
+**Analyze** displays selected-model embeddings in 3D. **Find failure** starts a
+bounded DQN search, evaluates actual model outputs, and colors measured regions
+of the graph. Review examples and supply desired targets to fine-tune a separate
+model checkpoint.
 
 ## Run
 
@@ -22,8 +22,9 @@ browser. If port 8000 is occupied, use `bash run.sh --port 8001`.
 If the browser does not open automatically, visit `http://127.0.0.1:8000`.
 
 The server uses the Python standard library. Image transformations use Pillow;
-embeddings use PyTorch, Transformers and NumPy; downloads use Hugging Face Hub and
-datasets. To install/check the environment separately from starting the server:
+embeddings and DQN use PyTorch, Transformers and NumPy; diffusion and LoRA use
+Diffusers and PEFT; downloads use Hugging Face Hub and datasets.
+To install/check the environment separately from starting the server:
 
 ```bash
 bash setup.sh
@@ -34,6 +35,27 @@ The launcher always uses `.venv/bin/python`, so packages from other projects or
 your Conda base environment do not affect this app. Setup also runs `pip check`
 for dependency conflicts. Setup installs CPU-only PyTorch if it is missing;
 no GPU is required. Transformers is constrained to the compatible 4.x API.
+Diffusers and PEFT are pinned to the versions tested together in this application.
+Image generation and fine-tuning can take substantially longer than analysis on CPU.
+
+### Over SSH
+
+On the server:
+
+```bash
+cd ~/Desktop/ml_failure/FailureShiftRL/web_interface
+.venv/bin/python -E server.py --port 8000
+```
+
+On your laptop, keep a second terminal open:
+
+```bash
+ssh -N -L 8000:127.0.0.1:8000 ssagar6@en4228255l
+```
+
+Open `http://127.0.0.1:8000` on your laptop. Match the local and remote port if
+changing it; the server validates the browser Host header. The service listens
+only on the server's loopback interface.
 
 ## Use
 
@@ -52,6 +74,12 @@ no GPU is required. Transformers is constrained to the compatible 4.x API.
 6. For summarization and generation, the single input and its action variants are
    analyzed together. Its action graph expands automatically. Click a point or use
    **Preview** to inspect the edited source text or filled prompt and its similarity.
+7. Click **Find failure** at the bottom right of the graph, set the episode budget
+   and evaluation criteria, and click **Start discovery**. Episode, reward, loss,
+   exploration rate, measured pair count and selected-model calls update live.
+8. Select a measured input/action to inspect the actual model output and score
+   components. After discovery completes or is cancelled, open **Fine-tune reviewed
+   examples**, provide desired targets, and start training when ready.
 
 For a short classification demo, choose **Hugging Face → MobileNetV2** and
 **Hugging Face dataset → Cats and dogs**, click **Load input data**, then
@@ -111,17 +139,19 @@ including the two presets. A local model must be a `save_pretrained` directory w
 `config.json`, `preprocessor_config.json`, and weights; arbitrary `.pt` files are not
 supported. Custom repository code is disabled. Unsupported models report an error;
 the app never substitutes another model or generates placeholder embeddings.
+Discovery additionally requires a pretrained single-label classification head with
+at least two classes. Regression and multilabel heads are explicitly unsupported.
 
 Summarization accepts compatible Transformers encoder-decoder checkpoints, such as
 T5 and BART. A local directory needs `config.json`, tokenizer files, and pretrained
-weights. The adapter runs only the encoder; source text uses the model's configured
+weights. Analyze runs only the encoder; source text uses the model's configured
 summarization prefix (or `summarize: ` for T5). Inputs beyond the encoder's supported
 token limit produce a clear error instead of being silently truncated.
 
 Image generation accepts **Stable Diffusion 1/2 pipelines** in Diffusers directory
 format with `model_index.json`, `text_encoder/`, and `tokenizer/`. The two presets
 use this format. Only the selected pipeline's CLIP text encoder and tokenizer are
-loaded/downloaded; its UNet and VAE are unnecessary for this prompt view. SDXL,
+loaded/downloaded during Analyze; its UNet and VAE are unnecessary for this prompt view. SDXL,
 FLUX, single-file checkpoints, and custom-code pipelines are not supported by this
 adapter. An incompatible selection reports an error without substituting another
 model. Prompt length is checked against the encoder's token limit.
@@ -143,8 +173,114 @@ The viewers run locally without a graph package, external JavaScript, or CDN.
   points. With the canvas focused, arrows rotate, +/− zoom, 0 fits, Escape shows
   all originals. Camera movement never changes the measured point positions.
 
-**Find failure** at the right end of the graph toolbar is a disabled placeholder
-for the future failure-discovery step.
+During discovery, the colors represent measured severity: green is low, red is
+high, and gray is unevaluated. Original points average their measured action pairs;
+expanded nodes show the score for that particular input/action. A pulse identifies
+the current input/action. Colors never move the points or change the camera.
+Use the measured-pair selector to inspect visited examples without requesting
+all action embeddings. New action expansion waits until model training/search
+finishes; already computed expansions remain selectable.
+
+## Discovery and rewards
+
+The search uses the [paper's macroscopic DQN structure](https://arxiv.org/abs/2406.07145),
+with **new task-specific rewards**. Each episode samples an original input, chooses
+one action combination, evaluates it and trains a 64–64 MLP from replay. The state
+is the full normalized model embedding, not the 3D PCA coordinate. Epsilon decays
+from 1.0 to 0.6 across the budget. Each transition terminates after one action, so
+the target is its measured reward, without a bootstrapped future value. A batch
+of 16 transitions is required before loss appears; short runs may only collect data.
+This implements macroscopic search, not a sequence of incremental corruptions.
+
+Baselines and variants use the same model revision and inference settings.
+Deterministic input/action outcomes are cached within each run; repeated episodes
+still update the DQN. The interface distinguishes episodes, unique measured pairs
+and actual selected-model calls. NLI/CLIP scorer calls are additional work.
+Each run gets its own seed; generation uses the same noise seed for an input's
+baseline and all its variants so changes can be compared. To explore another noise
+realization, start a new run with a different seed.
+
+| Domain | Evaluation criteria | Interpretation |
+| --- | --- | --- |
+| Classification | Target class error, confidence assigned to a wrong class, and loss of confidence in the target | With supplied labels: errors. Without labels: prediction changes requiring review. |
+| Summarization | Reference ROUGE-L overlap, repetition, and optionally NLI source support | Automated quality signals; not a proof of factual correctness. |
+| Generation | Independent CLIP similarity between the actual generated image and its prompt, plus degradation from the baseline | Prompt-alignment candidates; not demographic bias or aesthetic quality. |
+
+All rewards and plotted severities are bounded to `[0,1]`, but the scales mean
+different things across tasks and should not be compared as calibrated probabilities.
+These are practical starting criteria, not a claim of an optimal universal reward.
+
+**Classification.** Supply optional JSON labels indexed by input position, for
+example `{"0": 281, "1": "goldfish, Carassius auratus"}`. IDs and exact names must
+belong to the selected model's label space; dataset IDs are never silently assumed
+to match ImageNet IDs. Without a label, the original prediction becomes the
+consistency target. Let `e` indicate a target mismatch, `w` be the largest probability
+of a non-target class, and `d` be the positive relative drop in target probability.
+Reward is `0.5e + 0.25ew + 0.25d`. Severity is 1 for a mismatch, otherwise `d`.
+Metrics distinguish existing baseline errors from newly induced errors. Baseline
+mistakes retain a search signal but are not described as caused by the corruption.
+
+**Summarization.** Enter a human reference summary. The fast mode needs only the
+selected summarizer. The grounded mode also downloads
+[cross-encoder/nli-MiniLM2-L6-H768](https://huggingface.co/cross-encoder/nli-MiniLM2-L6-H768)
+to estimate support for each generated sentence in overlapping windows of the
+actually evaluated input. It does not silently fall back when that scorer is
+unavailable. Reference quality is `ROUGE-L F1 × distinct-bigram ratio`; grounded
+quality is the geometric mean of reference quality and source support. Empty
+summaries score zero. Reward is `0.5(1−quality) + 0.5 max(0, baseline_quality−quality)`;
+severity is `1−quality`. Quality below 0.5 or a drop above the chosen threshold is
+flagged for review. Reference overlap penalizes valid paraphrases, NLI can miss
+unsupported claims, and edits that change facts can legitimately change a summary.
+Inspect the source, reference and generated output before treating a flag as a
+failure or selecting it for training.
+
+**Generation.** Find failure loads the selected pipeline's UNet/VAE and an independent
+[CLIP ViT-B/32 scorer](https://huggingface.co/openai/clip-vit-base-patch32), in addition
+to the components loaded during Analyze. This can require substantial downloads.
+For cosine similarity `c`, quality is `(c+1)/2`; reward and severity use the same
+baseline-aware formula as summarization. A cosine below 0.25 or a normalized quality
+drop above the chosen threshold is a review candidate. The 0.25 cutoff is a heuristic,
+not a calibrated failure probability. Individual generated images and noise seeds
+are retained for inspection; safety-filter results are recorded separately.
+
+## Fine-tune reviewed examples
+
+Select a measured input/action pair and provide its explicit desired target:
+
+- Classification: a selected-model class ID or exact class label.
+- Summarization: a corrected reference summary for the edited input.
+- Generation: an absolute path **on the server** to a desired image; the selected
+  action's prompt supplies its caption. Failed generated images are not automatically
+  used as positive training examples.
+
+Add or remove reviewed examples, set epochs and learning rate, and press **Start
+fine-tuning**. Classification updates only the existing classifier head. Summarization
+trains the encoder-decoder on reviewed text/summary pairs. Generation trains UNet
+LoRA, saves the adapter, and saves a fused standalone pipeline that can be selected
+as a local model. The original model directory is unchanged. This first version
+trains on CPU; keep generation datasets and epoch budgets small for an initial test.
+
+Progress and loss are real optimization steps. These are training measurements,
+not held-out evidence of improvement. Use **Select checkpoint for Analyze** and
+evaluate on separate inputs before claiming that failures have been reduced.
+
+## Jobs and saved outputs
+
+**Cancel** stops between model operations; an in-flight model load or forward pass
+must finish first. Graph inspection and progress polling remain available. Analysis,
+discovery and fine-tuning share a model execution lock to avoid simultaneous heavy
+jobs. If inputs change during a job, its results stay associated with the old analysis
+and cancellation remains available; they are never overlaid on the new model.
+
+Each run saves under `runs/discoveries/<job-id>/`: a JSON report, episode JSONL,
+policy weights, and generated images when applicable. Report links appear in the UI.
+Fine-tuning saves a separate job directory containing `checkpoint/` and training
+metadata. Cancelled/error jobs preserve measured results. After a server restart,
+saved reports remain available through `GET /api/discoveries`; interrupted jobs are
+marked interrupted, not resumed. Analysis is session-local, so analyze again to
+start a new search or fine-tune after restarting.
+
+## Embedding geometry
 
 Classification features come from the selected model's pooled output, or the mean
 of its final spatial/token features. The presets expose pooled features as documented for
@@ -182,11 +318,11 @@ Use a smaller dataset split or a smaller feature model if needed.
 
 ## Fixed action space
 
-| Domain | Default combinations | What a node shows |
+| Domain | Default combinations | What Analyze previews |
 | --- | --- | --- |
 | Image classification | 125 per image: 5 rotations × 5 darkening values × 5 saturation factors | An altered image |
-| Summarization | 14 available named text edits | Edited source text, not a model-generated summary |
-| Image generation | 27: 3 descriptions × 3 professions × 3 settings | A filled prompt, not a generated image |
+| Summarization | 14 available named text edits | Edited source text; discovery adds actual summaries |
+| Image generation | 27: 3 descriptions × 3 professions × 3 settings | A filled prompt; discovery adds generated images |
 
 Classification values and generation choices match the repository's experiment
 configurations. The current interface only removes or restores these values; adding
@@ -219,6 +355,7 @@ and source images are untouched.
 node tests/test_ui.cjs
 node tests/test_embedding_view.cjs
 node tests/test_embedding_controller.cjs
+node tests/test_discovery_controller.cjs
 ```
 
 The Python tests check combination counts, real image transformations, folder
@@ -239,8 +376,17 @@ padding, prefixes, input limits, and incompatible checkpoints without downloads.
 CPU smoke tests with cached pretrained DistilBART and T5-base completed all 14
 text edits, producing 1024D and 768D features respectively. A cached pretrained
 MobileNetV2 smoke test covered four images and all 125 variants of one image.
-The generation adapter has been checked with tiny local CLIP test models; a
-fresh pretrained generation-preset download has not been exercised here.
+The discovery pipeline has also completed real cached MobileNetV2 and DistilBART
+runs, including policy updates, actual output scores and saved reports. A short
+DistilBART generation check verifies that checkpoint defaults do not conflict with
+the output budget. Summary discovery uses deterministic greedy decoding with
+bounded output length, independent of conflicting checkpoint generation defaults.
+
+New tests exercise state-dependent DQN learning, cancellation and failure cleanup,
+measured-only graph colors, stale response isolation, reviewed targets, actual
+tiny classifier/seq2seq optimization and reload, NLI scoring, real tiny SD/CLIP
+inference, and LoRA updates saved as a reloadable pipeline. Production diffusion,
+CLIP and NLI downloads have not been exercised in this sandbox.
 
 Native browser rendering and fresh Hugging Face network downloads remain
 unverified in the development sandbox. Run the environment check above before a

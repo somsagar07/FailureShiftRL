@@ -43,7 +43,7 @@ class Canvas {
 
 function setup() {
   const canvas = new Canvas(), events = {}, observed = [];
-  const context = {console, devicePixelRatio: 2,
+  const context = {console, clearTimeout(){}, setTimeout(){return 1;}, devicePixelRatio: 2,
     addEventListener(name, handler) {events[name] = handler;},
     ResizeObserver: class {constructor(callback) {this.callback = callback; observed.push(this);} observe() {}},
   };
@@ -382,6 +382,27 @@ test('pointerup displacement suppresses accidental clicks even without a final m
   canvas.fire('pointerdown', location);
   canvas.fire('pointerup', {...location, clientX: location.clientX + 5});
   assert.equal(selections.length, 0);
+});
+
+test('discovery colors only measured pairs, aggregates observed originals and preserves coordinates/camera', () => {
+  const {view,canvas}=setup();
+  const samples=[point(0,[-1,0,0]),point(1,[1,0,0]),point(2,[0,-1,0])];
+  view.setData(samples);view.focus(0);view.setExpansion(0,[action(3,[0,1,0]),action(4,[0,2,0])]);
+  view.orbit(.2,.1);view.zoom(1.2);
+  const before=view.projected.map(node=>({kind:node.kind,x:node.x,y:node.y,id:node.data.id??node.data.index}));
+  const records=[{input_index:0,action_id:3,severity:1},{input_index:1,action_id:3,severity:0}];
+  view.setDiscovery({status:'running',records,current:{input_index:0,action_id:3}});
+  assert.deepEqual(view.projected.map(node=>({kind:node.kind,x:node.x,y:node.y,id:node.data.id??node.data.index})),before,'polls cannot move the camera or points');
+  assert.equal(view.severities.get(0),1,'one measured failing action makes this observed aggregate 1, not 1 divided by all actions');
+  assert.equal(view.severities.get(1),0);assert.equal(view.severities.has(2),false);
+  const colors=view.projected.map((node,index)=>({node,color:circles(canvas)[index].color}));
+  assert.equal(colors.find(item=>item.node.kind==='action'&&item.node.data.id===4).color,'#9aa1a9','unvisited action stays gray');
+  assert.equal(colors.find(item=>item.node.kind==='action'&&item.node.data.id===3).color,view.severityColor(1));
+  assert.ok(canvas.context.strokes.some(stroke=>stroke.color==='#203f72'),'current pair is outlined');
+  view.setDiscovery({status:'completed',records:[...records,{input_index:0,action_id:4,severity:0}]});
+  assert.equal(view.severities.get(0),.5);
+  assert.ok(!canvas.context.strokes.some(stroke=>stroke.color==='#203f72'),'terminal jobs stop the pulse');
+  view.setDiscovery(null);assert.equal(view.discovery,null);
 });
 
 let failures = 0;

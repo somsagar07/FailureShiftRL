@@ -26,7 +26,7 @@ class EmbeddingExplorer {
 
   reset() {
     this.run++;this.selection++;clearTimeout(this.timer);clearTimeout(this.expansionTimer);
-    this.job=null;this.preview=null;this.point=null;this.expansion=null;
+    this.job=null;this.preview=null;this.point=null;this.expansion=null;this.expansionCache=new Map();
     this.view.reset();this.control('embedding-wrap').hidden=true;
     this.control('embedding-actions').hidden=true;
     this.control('embedding-back').disabled=true;
@@ -65,7 +65,7 @@ class EmbeddingExplorer {
     const population=images?'PCA fit on original images only':fitCount?`PCA fit on the original + ${fitCount-1} action variant${fitCount===2?'':'s'} (${fitCount} total)`:'PCA fit on the original and all action variants';
     this.control('embedding-meta').textContent=`${count} ${images?'image':'input'}${count===1?'':'s'} · ${job.feature_dim}D ${representation} → 3D PCA · ${variance}% variance retained · ${population}`;
     this.control('embedding-meta').title=`${job.model?.name||this.preview.config.model.name} · ${job.feature_method} · ${job.projection.method}. Positions approximate full-space similarity; cosine uses the full embeddings. No failure score is computed.`;
-    this.onStatus('Select an input to explore its action combinations.');this.onBusy(false);
+    this.onStatus('Select an input to explore its action combinations.');this.onBusy(false);this.onReady?.(job);
     if(!images&&job.points.length)await this.focus(job.points[0].index);
   }
 
@@ -83,6 +83,14 @@ class EmbeddingExplorer {
     this.control('embedding-actions').hidden=true;
     this.control('embedding-focus').textContent=`${point.name} · computing action embeddings…`;
     this.onError('');if(this.task==='classification')this.onSelectInput(index);this.onInspect(point,null,this.preview.config);
+    this.onInspectPair?.(index,null);
+    if(this.expansionCache.has(index)) {
+      await this.receiveExpansion(this.expansionCache.get(index),run,selection);return;
+    }
+    if(this.isDiscoveryActive?.()) {
+      this.control('embedding-focus').textContent=`${point.name} · live discovery; inspect measured actions below. Select this input after discovery to compute all action embeddings.`;
+      return;
+    }
     try {
       // Server supersession follows arrival order. Wait for the previous POST's
       // acknowledgement, but never wait for its inference job to finish.
@@ -109,7 +117,7 @@ class EmbeddingExplorer {
     }
     if(job.status!=='completed')throw new Error(job.error||'Could not compute the action embeddings.');
     if(job.input_index!==this.point.index)return;
-    this.expansion=job;this.view.setExpansion(job.input_index,job.nodes);this.view.fit();
+    this.expansionCache.set(job.input_index,job);this.expansion=job;this.view.setExpansion(job.input_index,job.nodes);this.view.fit();
     const choice=(value,label)=>{const el=document.createElement('option');el.value=value;el.textContent=label;return el;};
     this.control('embedding-action').replaceChildren(choice('original','Original input'),...job.nodes.map(node=>choice(String(node.id),`Combination ${node.id+1} · ${this.describeAction(node.action)}${node.unchanged?' · unchanged':''}`)));
     this.control('embedding-action').value='original';this.control('embedding-actions').hidden=false;
@@ -126,14 +134,28 @@ class EmbeddingExplorer {
     if(!this.point)return;
     this.view.selectAction(node?.id??null);
     this.control('embedding-action').value=node?String(node.id):'original';
-    this.onInspect(this.point,node||null,this.preview.config);
+    this.onInspect(this.point,node||null,this.preview.config);this.onInspectPair?.(this.point.index,node?.id??null);
+  }
+
+  focusMeasured(index,action) {
+    const point=this.job?.points.find(point=>point.index===index);if(!point)return;
+    this.selection++;clearTimeout(this.expansionTimer);this.point=point;
+    this.expansion=this.expansionCache.get(index)||null;
+    this.view.focus(index);
+    if(this.expansion)this.view.setExpansion(index,this.expansion.nodes);
+    this.view.selectAction(action);
+    this.control('embedding-back').disabled=false;
+    this.control('embedding-focus').textContent=`${point.name} · measured action ${action}`;
+    this.control('embedding-actions').hidden=true;
+    if(this.task==='classification')this.onSelectInput(index);
+    this.onInspect(point,this.expansion?.nodes.find(node=>node.id===action)||null,this.preview.config);
   }
 
   clearFocus() {
     this.selection++;clearTimeout(this.expansionTimer);this.point=null;this.expansion=null;
     this.view.clearFocus();this.control('embedding-actions').hidden=true;
     this.control('embedding-back').disabled=true;this.control('embedding-focus').textContent='';
-    this.onInspect(null,null);this.onError('');
+    this.onInspect(null,null);this.onInspectPair?.(null,null);this.onError('');
     if(this.job)this.onStatus('Select an input to explore its action combinations.');
   }
 }

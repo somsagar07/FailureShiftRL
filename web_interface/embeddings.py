@@ -184,6 +184,9 @@ class EmbeddingManager:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.encoder_factory = encoder_factory or create_encoder
         self.lock = threading.RLock()
+        # Discovery and fine-tuning share this resource boundary with analysis.
+        # The job-state lock remains free while model work is running.
+        self.model_lock = threading.RLock()
         self.jobs = {}
         self.expansions = {}
         self._preview_jobs = {}
@@ -200,6 +203,33 @@ class EmbeddingManager:
     def get(self, job_id):
         with self.lock:
             return copy.deepcopy(self.jobs[job_id])
+
+    def discovery_context(self, job_id):
+        """Return immutable analysis identity and independent full-dimensional states."""
+        import numpy as np
+        with self.lock:
+            job = copy.deepcopy(self.jobs[job_id])
+            if job['status'] != 'completed':
+                raise ValueError('Finish Analyze before finding failures.')
+            base = self._job_bases[job_id]
+            model = copy.deepcopy(job['model'])
+            if model['source'] == 'local' and _model_key(model) != base['model_key']:
+                raise ValueError('The local model changed after analysis. Analyze the input again.')
+            revision = self._revisions.get(base['model_key'])
+            if revision:
+                model['revision'] = revision
+            if job['task'] == 'classification':
+                states = np.array(np.load(base['path'], mmap_mode='r'), copy=True)
+            else:
+                states = base['states'].copy()
+            return dict(job=job, preview=self.previews.get(job['preview_id']),
+                        model=model, states=states, model_key=base['model_key'])
+
+    def release_encoder(self):
+        """Release cached weights before another model-heavy job takes ownership."""
+        with self.model_lock:
+            self._encoder = None
+            self._encoder_key = None
 
     def get_expansion(self, job_id, expansion_id):
         with self.lock:
@@ -280,13 +310,18 @@ class EmbeddingManager:
                     continue
                 record.update(status='running', phase='loading model')
             try:
-                if kind == 'overview':
-                    if record['task'] == 'classification':
-                        self._overview(identifier, key)
+                with self.model_lock:
+                    # A newer selection may cancel work while it waits for RL.
+                    with self.lock:
+                        if record['status'] == 'cancelled':
+                            continue
+                    if kind == 'overview':
+                        if record['task'] == 'classification':
+                            self._overview(identifier, key)
+                        else:
+                            self._text_overview(identifier, key)
                     else:
-                        self._text_overview(identifier, key)
-                else:
-                    self._expand(identifier)
+                        self._expand(identifier)
             except Exception as exc:
                 with self.lock:
                     if record['status'] != 'cancelled':
@@ -343,7 +378,7 @@ class EmbeddingManager:
                         neighbors=self._neighbors(features[:1], value, [point]))
             nodes.append(node)
         with self.lock:
-            self._job_bases[job_id] = {'model_key': key[1]}
+            self._job_bases[job_id] = {'model_key': key[1], 'states': features[:1].copy()}
             self._expansion_cache[(job_id, 0)] = dict(nodes=nodes, completed=len(nodes), neighbors=[])
             self.jobs[job_id].update(status='completed', phase='completed', completed=len(entries), points=[point],
                                      projection=projection, feature_dim=features.shape[1],

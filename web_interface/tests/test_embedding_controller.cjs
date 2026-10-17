@@ -67,6 +67,16 @@ const preview={id:'preview',config:{task:'classification',model:{name:'test/mode
   assert.equal(explorer.view.nodes.length,0);
   assert.equal(get('embedding-actions').hidden,true);
   assert.equal(inspected[0],null,'clearing focus also clears the old inspector');
+  const beforeLive=calls.length;explorer.isDiscoveryActive=()=>true;
+  await explorer.focus(0);
+  assert.equal(calls.length,beforeLive,'a live discovery selection cannot queue a full action expansion');
+  assert.match(get('embedding-focus').textContent,/live discovery/);
+  await explorer.focus(1);
+  assert.equal(calls.length,beforeLive,'already computed action embeddings stay inspectable without new model calls');
+  assert.equal(explorer.view.nodes[0].image,action(1).image);
+  explorer.focusMeasured(0,4);assert.equal(calls.length,beforeLive,'measured pair selection never runs inference');
+  assert.equal(explorer.view.index,0);assert.equal(inspected[0].image,points[0].image);
+  explorer.isDiscoveryActive=()=>false;
   deferNextEmbedding=true;const pending=explorer.load(preview);
   explorer.reset();resolveEmbedding(job);await pending;
   assert.equal(get('embedding-wrap').hidden,true,'a stale load cannot reopen a cleared map');

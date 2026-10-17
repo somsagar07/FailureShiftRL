@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local model-embedding and input-combination viewer. No failure search or RL."""
+"""Local model analysis, live RL failure discovery, and reviewed fine-tuning."""
 import argparse
 import copy
 import errno
@@ -18,6 +18,7 @@ from core import default_action_space, normalize_action_space, actions_for, appl
 from models import ModelManager
 from data_sources import DatasetManager, MAX_UPLOAD_BYTES
 from embeddings import EmbeddingManager, HuggingFaceEncoder, create_encoder
+from discovery import DiscoveryManager
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TEXT = ('A university research team tested a new water filter in three villages. '
@@ -163,13 +164,15 @@ class PreviewManager:
                 self.active = None
 
 
-def create_server(port=8000, directory=None):
+def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune_fn=None):
     previews = PreviewManager(directory or ROOT/'runs'/'previews')
     models = ModelManager()
     image_encoder, other_encoder = HuggingFaceEncoder, create_encoder
     def encoder_factory(model):
         return image_encoder(model) if model.get('task') == 'classification' else other_encoder(model)
     embeddings = EmbeddingManager(previews, previews.directory.parent/'embeddings', encoder_factory=encoder_factory)
+    discoveries = DiscoveryManager(previews, embeddings, previews.directory.parent/'discoveries',
+                                   evaluator_factory=evaluator_factory, finetune_fn=finetune_fn)
 
     class Handler(BaseHTTPRequestHandler):
         def send(self, status, body, kind='application/json'):
@@ -209,6 +212,16 @@ def create_server(port=8000, directory=None):
                 if path == '/api/catalog':
                     return self.send(200, dict(tasks={task: default_action_space(task) for task in TASKS},
                                                text=DEFAULT_TEXT, prompt=DEFAULT_PROMPT))
+                if path == '/api/discoveries':
+                    return self.send(200, discoveries.list())
+                match = re.fullmatch(r'/api/(discoveries|finetunes)/([0-9a-f]{32})', path)
+                if match:
+                    value = discoveries.get(match[2]) if match[1] == 'discoveries' else discoveries.get_finetune(match[2])
+                    return self.send(200, value)
+                match = re.fullmatch(r'/discoveries/([0-9a-f]{32})/artifacts/([A-Za-z0-9_.-]+)', path)
+                if match:
+                    file = discoveries.artifact(match[1], match[2])
+                    return self.send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or 'application/octet-stream')
                 match = re.fullmatch(r'/api/datasets/([0-9a-f]{32})(/items)?', path)
                 if match:
                     if match[2]:
@@ -226,13 +239,14 @@ def create_server(port=8000, directory=None):
                 if match:
                     return self.send(200, previews.image(match[1], int(match[2]), match[3]), 'image/png')
                 static = {'/': 'index.html', '/app.js': 'app.js', '/graph.js': 'graph.js',
-                          '/embedding-view.js':'embedding-view.js', '/embedding-controller.js':'embedding-controller.js', '/style.css': 'style.css'}
+                          '/embedding-view.js':'embedding-view.js', '/embedding-controller.js':'embedding-controller.js',
+                          '/discovery-controller.js':'discovery-controller.js', '/style.css': 'style.css'}
                 if path in static:
                     file = ROOT/'static'/static[path]
                     return self.send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or 'text/plain')
                 self.send(404, {'error': 'Not found.'})
             except (KeyError, FileNotFoundError):
-                self.send(404, {'error': 'Preview or file not found.'})
+                self.send(404, {'error': 'Job, preview, or file not found. Analyze the input again if the server restarted.'})
             except (ValueError, ImportError) as exc:
                 self.send(400, {'error': str(exc)})
 
@@ -250,6 +264,17 @@ def create_server(port=8000, directory=None):
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                     return self.send(415, {'error': 'Send application/json.'})
                 data = json.loads(self.rfile.read(length))
+                if self.path in ('/api/discoveries', '/api/finetunes'):
+                    if not isinstance(data, dict):
+                        raise ValueError('Request must be a JSON object.')
+                    job = discoveries.start(data) if self.path == '/api/discoveries' else discoveries.start_finetune(data)
+                    return self.send(202, job)
+                cancellation = re.fullmatch(r'/api/(discoveries|finetunes)/([0-9a-f]{32})/cancel', self.path)
+                if cancellation:
+                    if not isinstance(data, dict):
+                        raise ValueError('Request must be a JSON object.')
+                    job = discoveries.cancel(cancellation[2]) if cancellation[1] == 'discoveries' else discoveries.cancel_finetune(cancellation[2])
+                    return self.send(200, job)
                 if self.path == '/api/embeddings':
                     if not isinstance(data, dict) or not isinstance(data.get('preview_id'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['preview_id']):
                         raise ValueError('Generate an image preview before loading its embeddings.')
@@ -274,7 +299,7 @@ def create_server(port=8000, directory=None):
             except RuntimeError as exc:
                 self.send(409, {'error': str(exc)})
             except KeyError:
-                self.send(404, {'error': 'Dataset not found. Load it again.'})
+                self.send(404, {'error': 'Job or dataset not found. Analyze the input again if the server restarted.'})
 
         def log_message(self, fmt, *args):
             if len(args) > 1 and str(args[1]) not in ('200', '202'):
@@ -282,6 +307,8 @@ def create_server(port=8000, directory=None):
 
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.previews = previews
+    server.embeddings = embeddings
+    server.discoveries = discoveries
     return server
 
 

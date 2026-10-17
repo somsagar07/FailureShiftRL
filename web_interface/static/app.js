@@ -21,6 +21,15 @@ const embeddingExplorer=new EmbeddingExplorer({api,onInspect:inspectEmbedding,on
   onStatus:message=>{$('preview-status').textContent=message;},onError:error,
   onBusy:value=>{busy=value;updateControls();}});
 
+let discovery;
+discovery=new DiscoveryController({api,explorer:embeddingExplorer,onChange:()=>updateControls(),onCheckpoint:path=>{
+  $('model-source').value='local';$('model-name').value=path;modelChoiceChanged();
+  $('model-status').textContent='Saved checkpoint selected. Click Analyze to evaluate it.';
+}});
+embeddingExplorer.onReady=job=>discovery.ready(job);
+embeddingExplorer.onInspectPair=(index,action)=>discovery.inspectPair(index,action);
+embeddingExplorer.isDiscoveryActive=()=>Boolean(discovery.active);
+
 function element(tag,text,className) {
   const el=document.createElement(tag);
   if(text!==undefined)el.textContent=text;
@@ -51,7 +60,7 @@ function updateControls() {
   show('action-error',!count);
   const images=task==='classification',inputReady=images?Boolean(dataset):Boolean($('source-text').value.trim());
   const inputLoading=images&&(datasetLoading||pageLoading);
-  $('generate').disabled=busy||inputLoading||!count||!inputReady||!selectedModel().name;
+  $('generate').disabled=busy||Boolean(discovery?.active)||inputLoading||!count||!inputReady||!selectedModel().name;
   $('generate').textContent=busy?'Analyzing…':'Analyze';
   $('config-fields').disabled=busy||(images&&datasetLoading);
   const imagesUnavailable=!images||busy||datasetLoading||pageLoading||!dataset;
@@ -63,7 +72,7 @@ function updateControls() {
 }
 function clearPreview() {
   previewRequest++;clearTimeout(previewTimer);busy=false;
-  embeddingExplorer.reset();
+  discovery.invalidate();embeddingExplorer.reset();
   preview=null;show('graph-wrap',false);show('details',false);
   $('preview-status').textContent='Click Analyze to explore model embeddings and action combinations.';
   updateControls();
@@ -184,7 +193,7 @@ async function pollPreview(id,request) {
   } catch(e){if(request!==previewRequest)return;busy=false;updateControls();error(e.message);$('preview-status').textContent='Connection interrupted. Click Analyze to try again.';}
 }
 $('preview-form').addEventListener('submit',async event=>{
-  event.preventDefault();error('');if(busy||!actionCount()||(task==='classification'&&(datasetLoading||pageLoading||!dataset)))return;
+  event.preventDefault();error('');if(busy||discovery.active||!actionCount()||(task==='classification'&&(datasetLoading||pageLoading||!dataset)))return;
   const model=selectedModel();
   if(!model.name){error('Choose a model to compute embeddings.');return;}
   if(task!=='classification'&&!$('source-text').value.trim()){error('Enter source text or a prompt template to analyze.');return;}

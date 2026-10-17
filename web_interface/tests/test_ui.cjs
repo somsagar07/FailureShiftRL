@@ -72,7 +72,7 @@ const context={document,console,setTimeout:()=>1,clearTimeout(){},window:{addEve
   return {ok:true,json:async()=>data};
 }};
 vm.createContext(context);
-for(const script of ['graph.js','embedding-view.js','embedding-controller.js','app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../static',script),'utf8'),context);
+for(const script of ['graph.js','embedding-view.js','embedding-controller.js','discovery-controller.js','app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../static',script),'utf8'),context);
 async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
 (async()=>{
   await flush();
