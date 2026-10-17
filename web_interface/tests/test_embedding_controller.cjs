@@ -41,6 +41,7 @@ vm.runInContext('const explorer=new EmbeddingExplorer(options);',context);
 const explorer=vm.runInContext('explorer',context);
 const preview={id:'preview',config:{task:'classification',model:{name:'test/model'},action_space:{rotation:[5],darkness:[.2],saturation:[.5]}}};
 const content=element=>[element.textContent,...element.children.map(content)].join(' ');
+const watchdog=setTimeout(()=>{console.error('Controller workflow did not finish');process.exitCode=1;},5000);
 (async()=>{
   await explorer.load(preview,'cuda');
   assert.equal(calls[0].body.preview_id,'preview','the map uses the current preview, model and dataset');
@@ -75,13 +76,15 @@ const content=element=>[element.textContent,...element.children.map(content)].jo
   assert.equal(get('embedding-actions').hidden,true);
   assert.equal(inspected[0],null,'clearing focus also clears the old inspector');
   const beforeLive=calls.length;explorer.isDiscoveryActive=()=>true;
-  await explorer.focus(0);
-  assert.equal(calls.length,beforeLive,'a live discovery selection cannot queue a full action expansion');
-  assert.match(get('embedding-focus').textContent,/live discovery/);
+  const live=explorer.focus(0);
+  for(let i=0;i<10;i++)await Promise.resolve();
+  assert.equal(calls.length,beforeLive+1,'a live discovery selection still requests its full action graph');
+  resolveExpansion(expansion(0));await live;
+  assert.equal(explorer.view.nodes[0].image,action(0).image);
   await explorer.focus(1);
-  assert.equal(calls.length,beforeLive,'already computed action embeddings stay inspectable without new model calls');
+  assert.equal(calls.length,beforeLive+1,'already computed action embeddings stay inspectable without new model calls');
   assert.equal(explorer.view.nodes[0].image,action(1).image);
-  explorer.focusMeasured(0,4);assert.equal(calls.length,beforeLive,'measured pair selection never runs inference');
+  explorer.focusMeasured(0,4);assert.equal(calls.length,beforeLive+1,'measured pair selection never runs inference');
   assert.equal(explorer.view.index,0);assert.equal(inspected[0].image,points[0].image);
   explorer.isDiscoveryActive=()=>false;
   deferNextEmbedding=true;const pending=explorer.load(preview);
@@ -146,4 +149,4 @@ const content=element=>[element.textContent,...element.children.map(content)].jo
   console.log('PASS: dataset overview, focus/expansion, action inspector, collapse, stale responses and model errors');
   console.log('PASS: text domains focus their input, label encoder and PCA population, and preserve text/cosine selection');
   console.log('PASS: selected Analyze device, actual device/timings, cached stages and stale result clearing');
-})().catch(err=>{console.error(err);process.exitCode=1;});
+})().catch(err=>{console.error(err);process.exitCode=1;}).finally(()=>clearTimeout(watchdog));

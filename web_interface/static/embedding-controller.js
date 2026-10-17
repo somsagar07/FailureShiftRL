@@ -27,7 +27,7 @@ class EmbeddingExplorer {
   reset() {
     this.run++;this.selection++;clearTimeout(this.timer);clearTimeout(this.expansionTimer);
     this.job=null;this.preview=null;this.point=null;this.action=null;this.expansion=null;this.expansionCache=new Map();
-    this.discovery=null;this.measuredCache=new Map();
+    this.discovery=null;this.measuredCache=new Map();this.partialExpansions=new Map();
     this.view.reset();this.control('embedding-wrap').hidden=true;
     this.control('embedding-actions').hidden=true;
     this.control('embedding-back').disabled=true;
@@ -122,12 +122,8 @@ class EmbeddingExplorer {
     if(this.expansionCache.has(index)) {
       await this.receiveExpansion(this.expansionCache.get(index),run,selection);return;
     }
-    const measured=this.measuredExpansion(index);
-    if(measured)this.showExpansion(measured);
-    if(this.isDiscoveryActive?.()) {
-      if(!measured)this.control('embedding-focus').textContent=`${point.name} · live discovery · waiting for measured actions…`;
-      return;
-    }
+    const available=this.availableExpansion(index);
+    if(available)this.showExpansion(available);
     try {
       // Server supersession follows arrival order. Wait for the previous POST's
       // acknowledgement, but never wait for its inference job to finish.
@@ -144,7 +140,16 @@ class EmbeddingExplorer {
 
   async receiveExpansion(job,run,selection) {
     if(run!==this.run||selection!==this.selection)return;
+    if(job.input_index!==this.point?.index)return;
     if(job.status==='queued'||job.status==='running') {
+      if(job.nodes?.length) {
+        // A superseded expansion may restart with a smaller first batch.
+        // Keep its already computed nodes selectable until the full job arrives.
+        const nodes=new Map((this.partialExpansions.get(job.input_index)?.nodes||[]).map(node=>[node.id,node]));
+        for(const node of job.nodes)nodes.set(node.id,node);
+        this.partialExpansions.set(job.input_index,{...job,nodes:[...nodes.values()]});
+        this.showExpansion(this.availableExpansion(job.input_index));
+      }
       this.control('embedding-focus').textContent=`${this.point.name} · ${job.phase||'Computing actions'}${job.total?` · ${job.completed} / ${job.total}`:''}`;
       this.expansionTimer=setTimeout(async()=>{
         if(run!==this.run||selection!==this.selection)return;
@@ -153,13 +158,15 @@ class EmbeddingExplorer {
       },350);return;
     }
     if(job.status!=='completed')throw new Error(job.error||'Could not compute the action embeddings.');
-    if(job.input_index!==this.point.index)return;
+    this.partialExpansions.delete(job.input_index);
     this.expansionCache.set(job.input_index,job);this.showExpansion(job);
   }
 
-  measuredExpansion(index) {
-    const nodes=this.measuredCache.get(index);
-    return nodes?.size?{input_index:index,nodes:[...nodes.values()].sort((a,b)=>a.id-b.id),partial:true}:null;
+  availableExpansion(index) {
+    if(this.expansionCache.has(index))return this.expansionCache.get(index);
+    const progress=this.partialExpansions.get(index),nodes=new Map(this.measuredCache.get(index));
+    for(const node of progress?.nodes||[])nodes.set(node.id,node);
+    return nodes.size?{...progress,input_index:index,nodes:[...nodes.values()].sort((a,b)=>a.id-b.id),partial:true,measuredOnly:!progress}:null;
   }
 
   showExpansion(expansion) {
@@ -169,7 +176,8 @@ class EmbeddingExplorer {
     const choice=(value,label)=>{const el=document.createElement('option');el.value=value;el.textContent=label;return el;};
     this.control('embedding-action').replaceChildren(choice('original','Original input'),...expansion.nodes.map(node=>choice(String(node.id),`Combination ${node.id+1} · ${this.describeAction(node.action)}${node.unchanged?' · unchanged':''}`)));
     this.control('embedding-action').value=this.action===null?'original':String(this.action);this.control('embedding-actions').hidden=false;
-    this.control('embedding-focus').textContent=`${this.point.name} · ${expansion.nodes.length} ${expansion.partial?'measured actions':'action combinations'}${expansion.partial&&this.isDiscoveryActive?.()?' · live discovery':''}`;
+    const count=expansion.partial&&!expansion.measuredOnly?`${expansion.nodes.length} / ${expansion.total}`:expansion.nodes.length;
+    this.control('embedding-focus').textContent=`${this.point.name} · ${count} ${expansion.measuredOnly?'measured actions':'action combinations'}${expansion.partial&&this.isDiscoveryActive?.()?' · live discovery':''}`;
   }
 
   setDiscovery(job) {
@@ -183,7 +191,7 @@ class EmbeddingExplorer {
       this.measuredCache.get(record.input_index).set(node.id,node);
     }
     if(!this.point)return;
-    const expansion=this.expansionCache.get(this.point.index)||this.measuredExpansion(this.point.index);
+    const expansion=this.availableExpansion(this.point.index);
     if(expansion)this.showExpansion(expansion);
     else if(this.expansion?.partial) {
       this.expansion=null;this.view.setExpansion(this.point.index,[]);
@@ -207,8 +215,9 @@ class EmbeddingExplorer {
 
   focusMeasured(index,action) {
     const point=this.job?.points.find(point=>point.index===index);if(!point)return;
-    this.selection++;clearTimeout(this.expansionTimer);this.point=point;this.action=action;
-    this.expansion=this.expansionCache.get(index)||this.measuredExpansion(index);
+    if(this.point?.index!==index){this.selection++;clearTimeout(this.expansionTimer);}
+    this.point=point;this.action=action;
+    this.expansion=this.availableExpansion(index);
     this.view.focus(index);
     if(this.expansion)this.showExpansion(this.expansion);
     this.view.selectAction(action);

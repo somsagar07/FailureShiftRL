@@ -211,11 +211,18 @@ class DiscoveryManager:
             raise InterruptedError('Cancelled by user.')
 
     @contextmanager
-    def _model_access(self, job_id, *, retain_models=False):
+    def _inference_access(self, job_id):
         while not self.embeddings.model_lock.acquire(timeout=.1):
             self._check(job_id)
         try:
             self._check(job_id)
+            yield
+        finally:
+            self.embeddings.model_lock.release()
+
+    @contextmanager
+    def _model_access(self, job_id, *, retain_models=False):
+        with self._inference_access(job_id):
             context = self._contexts[job_id]
             fresh = self._context(context['job']['id'])
             if fresh['model_key'] != context['model_key']:
@@ -224,8 +231,10 @@ class DiscoveryManager:
             if not retain_models:
                 self.embeddings.release_encoder()
             yield
-        finally:
-            self.embeddings.model_lock.release()
+
+    def _close_evaluator(self, evaluator):
+        with self.embeddings.model_lock:
+            evaluator.close()
 
     def _update(self, job_id, **fields):
         with self.lock:
@@ -297,20 +306,20 @@ class DiscoveryManager:
         try:
             self._update(job_id, status='running', phase='waiting for model')
             with ExitStack() as cleanup:
-                cleanup.enter_context(self._model_access(job_id, retain_models=True))
-                self._update(job_id, phase='loading selected model and scorers')
-                factory = self.evaluator_factory or self.embeddings.evaluation_model
-                evaluator = factory(context['model'], config, directory,
-                                    progress=lambda **fields: self._progress(job_id, **fields))
-                cleanup.callback(evaluator.close)
-                self._check(job_id)
-                if config['task'] == 'classification' and config['label_map']:
-                    resolve = getattr(evaluator, 'resolve_label', None)
-                    if resolve is None:
-                        raise ValueError('The classification evaluator cannot validate explicit model labels.')
-                    for target in config['label_map'].values():
-                        resolve(target)
-                self._update(job_id, scoring=_json(evaluator.describe()))
+                with self._model_access(job_id, retain_models=True):
+                    self._update(job_id, phase='loading selected model and scorers')
+                    factory = self.evaluator_factory or self.embeddings.evaluation_model
+                    evaluator = factory(context['model'], config, directory,
+                                        progress=lambda **fields: self._progress(job_id, **fields))
+                    cleanup.callback(self._close_evaluator, evaluator)
+                    self._check(job_id)
+                    if config['task'] == 'classification' and config['label_map']:
+                        resolve = getattr(evaluator, 'resolve_label', None)
+                        if resolve is None:
+                            raise ValueError('The classification evaluator cannot validate explicit model labels.')
+                        for target in config['label_map'].values():
+                            resolve(target)
+                    self._update(job_id, scoring=_json(evaluator.describe()))
                 states = context['states']
                 actions = context['preview']['actions']
                 policy = TerminalDQN(states.shape[1], len(actions), seed=config['seed'])
@@ -320,6 +329,7 @@ class DiscoveryManager:
                 with (directory/'episodes.jsonl').open('a') as stream:
                     for episode in range(1, config['episodes']+1):
                         self._check(job_id)
+                        self.embeddings.wait_for_expansion(context['job']['id'], self._events[job_id])
                         index = rng.randrange(len(states))
                         epsilon = 1.-.4*(episode-1)/max(1, config['episodes']-1)
                         action_index = policy.choose(states[index], epsilon=epsilon)
@@ -328,21 +338,27 @@ class DiscoveryManager:
                         target = config['label_map'].get(str(index))
                         self._update(job_id, phase='evaluating baseline' if index not in baseline_cache else 'evaluating action',
                                      epsilon=epsilon, current={'input_index': index, 'action_id': action_id})
-                        if index not in baseline_cache:
-                            output = self._predict(job_id, evaluator, self._input(context, index), index, f'input-{index}-baseline')
-                            baseline_cache[index] = output
-                            score = self._score(evaluator, output, output, target)
-                            baseline = dict(input_index=index, output=output, **score)
-                            with self.lock:
-                                self.jobs[job_id]['baseline'].append(baseline)
-                        self._check(job_id)
-                        cached = pair in pair_cache
-                        if not cached:
-                            self._update(job_id, phase='evaluating action')
-                            output = self._predict(job_id, evaluator, self._input(context, index, action_id), index,
-                                                   f'input-{index}-action-{action_id}')
-                            score = self._score(evaluator, output, baseline_cache[index], target)
-                            pair_cache[pair] = (output, score)
+                        # Expansion and evaluation share weights, so serialize
+                        # model work while leaving gaps for interactive graphs.
+                        with self._inference_access(job_id):
+                            if index not in baseline_cache:
+                                output = self._predict(job_id, evaluator, self._input(context, index), index, f'input-{index}-baseline')
+                                baseline_cache[index] = output
+                                score = self._score(evaluator, output, output, target)
+                                baseline = dict(input_index=index, output=output, **score)
+                                with self.lock:
+                                    self.jobs[job_id]['baseline'].append(baseline)
+                            self._check(job_id)
+                            cached = pair in pair_cache
+                            if not cached:
+                                self._update(job_id, phase='evaluating action')
+                                output = self._predict(job_id, evaluator, self._input(context, index, action_id), index,
+                                                       f'input-{index}-action-{action_id}')
+                                score = self._score(evaluator, output, baseline_cache[index], target)
+                                pair_cache[pair] = (output, score)
+                            if pair not in nodes and not self._events[job_id].is_set():
+                                nodes[pair] = self.embeddings.discovery_node(
+                                    context['job']['id'], index, action_id, evaluator=evaluator)
                         output, score = pair_cache[pair]
                         # A completed measurement remains useful even if a cancel
                         # arrives during its model operation.
@@ -354,9 +370,6 @@ class DiscoveryManager:
                                       severity=score['severity'], failure_rate=float(score['failure']),
                                       reward=score['reward'], failure=score['failure'], output=output,
                                       metrics=score['metrics'], criterion=score['criterion'])
-                        if pair not in nodes and not self._events[job_id].is_set():
-                            nodes[pair] = self.embeddings.discovery_node(
-                                context['job']['id'], index, action_id, evaluator=evaluator)
                         if pair in nodes:
                             record['node'] = nodes[pair]
                         aggregates[pair] = record

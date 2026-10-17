@@ -6,14 +6,14 @@ class DiscoveryController {
     Object.assign(this,{api,explorer,onCheckpoint,onChange});
     this.el=id=>document.getElementById(id);
     this.learningRates={classification:'0.001',summarization:'0.00002',generation:'0.0001'};
-    this.version=0;this.job=null;this.training=null;this.examples=[];this.selected=null;this.context=null;
+    this.version=0;this.job=null;this.training=null;this.examples=[];this.selected=null;this.context=null;this.inspectionOpen=false;
     const bind=(id,event,fn)=>this.el(id).addEventListener(event,fn);
     bind('find-failure','click',()=>{this.el('discovery-panel').hidden=false;this.configure();});
     bind('discovery-start','click',()=>this.start());
     bind('discovery-cancel','click',()=>this.cancel('discoveries'));
     bind('finetune-cancel','click',()=>this.cancel('finetunes'));
     bind('discovery-retry','click',()=>this.poll(this.trainingActive?'finetunes':'discoveries',this.version));
-    bind('discovery-pair','change',()=>{this.selected=this.el('discovery-pair').value;this.selectionTouched=true;this.inspectSelected(true);});
+    bind('discovery-pair','change',()=>{this.selected=this.el('discovery-pair').value||null;this.inspectionOpen=Boolean(this.selected);this.inspectSelected(true);this.controls();});
     bind('finetune-add','click',()=>this.addExample());
     bind('finetune-start','click',()=>this.startTraining());
     bind('finetune-use','click',()=>{if(this.attached&&this.training?.status==='completed'&&this.training.checkpoint)this.onCheckpoint(this.training.checkpoint);});
@@ -26,7 +26,7 @@ class DiscoveryController {
   ready(job) {
     if(this.context!==job.id&&['cpu','cuda'].includes(job.device))this.el('discovery-device').value=job.device;
     this.context=job.id;this.configure();
-    if(!this.attached){this.hideResults();this.examples=[];this.selected=null;this.el('finetune-examples').replaceChildren();}
+    if(!this.attached){this.hideResults();this.examples=[];this.selected=null;this.inspectionOpen=false;this.el('finetune-examples').replaceChildren();}
     this.controls();
   }
   hideResults() {
@@ -47,7 +47,7 @@ class DiscoveryController {
     this.el('finetune-target-label').textContent=task==='classification'?'Desired class ID or exact model label':task==='summarization'?'Corrected target summary':'Absolute server path to desired image (caption uses the selected prompt)';
   }
   invalidate() {
-    this.context=null;this.selected=null;this.inspectedIndex=null;this.selectionTouched=false;this.examples=[];
+    this.context=null;this.selected=null;this.inspectionOpen=false;this.examples=[];
     this.el('discovery-inspector').hidden=true;this.el('discovery-records').hidden=true;
     this.el('finetune-panel').hidden=true;this.el('severity-legend').hidden=true;
     this.el('finetune-target').value='';this.el('finetune-examples').replaceChildren();
@@ -100,7 +100,7 @@ class DiscoveryController {
       if(version!==this.version)return;
       this.pending=false;this.job=job;this.examples=[];this.training=null;
       const point=this.explorer.point,action=this.explorer.action;
-      this.inspectedIndex=point?.index??null;this.selectionTouched=Boolean(point);
+      this.inspectionOpen=false;
       this.selected=point&&action!==null&&action!==undefined?`${point.index}:${action}`:null;
       this.el('finetune-examples').replaceChildren();this.el('finetune-checkpoint').hidden=true;
       this.el('finetune-status').textContent='';this.receive('discoveries',job,version);
@@ -142,17 +142,25 @@ class DiscoveryController {
     if(!this.attached){this.hideResults();return;}
     this.el('severity-legend').hidden=false;
     if(this.explorer.setDiscovery)this.explorer.setDiscovery(job);else this.explorer.view.setDiscovery(job);
-    const records=job.records||[],selector=this.el('discovery-pair');
-    selector.replaceChildren(...records.map(record=>{const option=document.createElement('option');option.value=this.key(record);option.textContent=`Input ${record.input_index} · action ${record.action_id} · severity ${this.format(record.severity)} (${record.visits} visits)`;return option;}));
-    if(!this.selected&&!this.selectionTouched)this.selected=records.length?this.key(records[0]):null;
-    selector.value=this.selected||'';this.el('discovery-records').hidden=!records.length;
+    this.inspectionOptions();
     this.inspectSelected(false);
+  }
+  inspectionOptions() {
+    const records=this.job?.records||[],selector=this.el('discovery-pair');
+    const option=(value,label)=>{const el=document.createElement('option');el.value=value;el.textContent=label;return el;};
+    const choices=records.map(record=>option(this.key(record),`Input ${record.input_index} · action ${record.action_id} · severity ${this.percent(record.severity)} (${record.visits} visits)`));
+    if(this.selected&&!records.some(record=>this.key(record)===this.selected)) {
+      const [index,action]=this.selected.split(':');
+      choices.push(option(this.selected,`Input ${index} · action ${action} · unevaluated`));
+    }
+    selector.replaceChildren(option('','Select an input/action…'),...choices);
+    selector.value=this.inspectionOpen?this.selected||'':'';
+    this.el('discovery-records').hidden=!choices.length;
   }
   inspectPair(index,action) {
     if(!this.attached||!this.job)return;
-    this.selectionTouched=true;this.inspectedIndex=index;this.selected=action===null?null:`${index}:${action}`;
-    this.el('discovery-pair').value=this.selected||'';
-    this.inspectSelected(false,index);this.controls();
+    this.selected=index===null||action===null?null:`${index}:${action}`;this.inspectionOpen=false;
+    this.inspectionOptions();this.inspectSelected(false);this.controls();
   }
   paragraph(text) {const el=document.createElement('p');el.textContent=text;return el;}
   percent(value) {return typeof value==='number'&&Number.isFinite(value)?`${(100*value).toFixed(1)}%`:'—';}
@@ -200,13 +208,13 @@ class DiscoveryController {
     this.el('discovery-components').replaceChildren();this.el('discovery-components').textContent=record?'':'This action has not been evaluated.';
     if(rows.length)this.el('discovery-components').append(list);
   }
-  inspectSelected(focus=false,baselineIndex=null) {
+  inspectSelected(focus=false) {
     if(!this.attached){this.hideResults();return;}
+    this.el('discovery-inspector').hidden=!this.inspectionOpen||!this.selected;
+    if(!this.inspectionOpen||!this.selected)return;
     const record=this.job?.records?.find(record=>this.key(record)===this.selected);
-    const index=record?.input_index??baselineIndex??(this.selected?Number(this.selected.split(':')[0]):this.inspectedIndex);
+    const index=record?.input_index??Number(this.selected.split(':')[0]);
     const baseline=this.job?.baseline?.find(item=>item.input_index===index);
-    this.el('discovery-inspector').hidden=index===null||index===undefined;
-    if(index===null||index===undefined)return;
     this.output('discovery-baseline',baseline?.output);this.output('discovery-output',record?.output);
     this.metricRows(record,record?.action_id??(this.selected?Number(this.selected.split(':')[1]):null));
     if(focus&&record)this.explorer.focusMeasured(record.input_index,record.action_id);

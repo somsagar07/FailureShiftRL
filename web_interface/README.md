@@ -249,13 +249,17 @@ During discovery, the colors represent measured severity: green is low, red is
 high, and gray is unevaluated. Original points average their measured action pairs;
 expanded nodes show the score for that particular input/action. A pulse identifies
 the current input/action. Colors never move the points or change the camera.
-Use the measured-pair selector to inspect visited examples without requesting
-all action embeddings. During search, selecting an original shows its measured
-action nodes as they become available. Each new image variant is embedded once
-using the analysis model and the same fitted PCA; text/prompt action positions are
-already available from Analyze. Previously expanded nodes also remain selectable.
+Selecting an original expands its full action graph during search as well as
+afterward. Image embeddings appear in batches, using the analysis model and the
+same fitted PCA; text/prompt positions are already available from Analyze.
+Interactive expansion takes priority between discovery episodes. Model operations
+remain serialized, and discovery resumes when the expansion finishes. Newly
+plotted actions stay gray until their outputs are evaluated.
 Progress updates preserve your selection and camera, including clicks that span a
-status refresh. Expanding every remaining image action can be requested after search.
+status refresh. Graph clicks preview inputs; predictions and detailed scores open
+only when you choose an entry from **Inspect**. Clear that selector or select
+another graph node to close the measured details. The compact legend explains
+severity, current and selected nodes, and action sizes.
 
 Action sphere size reflects **variation in DQN action preference across original
 inputs**: lower variation means a larger sphere. The inspector gives the action's

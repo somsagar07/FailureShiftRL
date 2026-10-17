@@ -226,6 +226,7 @@ class EmbeddingManager:
         self.model_preparer = model_preparer if model_preparer is not None else (
             prepare_analysis_model if encoder_factory is None else None)
         self.lock = threading.RLock()
+        self._expansion_finished = threading.Condition(self.lock)
         # Discovery and fine-tuning share this resource boundary with analysis.
         # The job-state lock remains free while model work is running.
         self.model_lock = threading.RLock()
@@ -470,6 +471,20 @@ class EmbeddingManager:
             self._worker = threading.Thread(target=self._run, daemon=True)
             self._worker.start()
 
+    def wait_for_expansion(self, job_id, cancelled):
+        """Give the selected input's graph priority between discovery episodes.
+
+        The caller must release model_lock first. Cancellation is checked while
+        waiting; the embedding worker still owns every model operation itself.
+        """
+        with self._expansion_finished:
+            while not cancelled.is_set():
+                active = self.expansions.get(self._active_expansion)
+                if (not active or active['job_id'] != job_id or
+                        active['status'] not in ('queued', 'running')):
+                    return
+                self._expansion_finished.wait(timeout=.1)
+
     def _run(self):
         while True:
             with self.lock:
@@ -509,6 +524,7 @@ class EmbeddingManager:
                                 record.update(status='error', phase='error', error=error)
                             else:
                                 record.update(status='completed', phase='completed')
+                        self._expansion_finished.notify_all()
 
     @staticmethod
     def _empty_timings():
@@ -765,7 +781,7 @@ class EmbeddingManager:
             with self.lock:
                 if self.expansions[expansion_id]['status'] == 'cancelled':
                     return
-                self.expansions[expansion_id].update(completed=len(nodes), phase='embedding transformations')
+                self.expansions[expansion_id].update(nodes=list(nodes), completed=len(nodes), phase='embedding transformations')
         details = dict(nodes=nodes, completed=len(nodes), neighbors=self._neighbors(features, features[index], job['points'], exclude=index))
         with self.lock:
             if self.expansions[expansion_id]['status'] == 'cancelled':

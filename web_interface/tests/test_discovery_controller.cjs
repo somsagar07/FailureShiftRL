@@ -22,6 +22,36 @@ function setup(task='classification') {
 const record=(input_index=0,action_id=4)=>({input_index,action_id,visits:1,severity:.8,reward:.4,failure_rate:1,criterion:'confirmed error',metrics:{confidence_drop:.6},output:{class_id:3,label:'dog',confidence:.3}});
 const job=(extra={})=>({id:'discovery1',embedding_id:'emb1',task:'classification',status:'running',episode:1,episodes:10,epsilon:.96,loss:.12,reward:.4,mean_reward:.4,unique_evaluations:1,model_calls:2,records:[record()],baseline:[{input_index:0,output:{class_id:2,label:'cat',confidence:.9}}],current:{input_index:0,action_id:4},...extra});
 const tests=[];function test(name,fn){tests.push({name,fn});}
+function inspect(get,key='0:4'){get('discovery-pair').value=key;get('discovery-pair').events.change();}
+
+test('outputs require an explicit Inspect choice in every workspace and stay hidden after clearing',async()=>{
+  for(const task of ['classification','summarization','generation']) {
+    const f=setup(task),{controller:c,get,responses}=f;f.ready();
+    get('discovery-reference').value='Reviewed reference';
+    responses.push(job({task}));await c.start();
+    assert.equal(get('discovery-inspector').hidden,true,`${task}: starting discovery must not open outputs`);
+    assert.equal(get('discovery-pair').value,'');
+    assert.equal(get('discovery-pair').children[0].value,'','Inspect has an empty placeholder');
+    c.inspectPair(0,4);
+    assert.equal(get('discovery-inspector').hidden,true,'a graph click previews inputs without opening model outputs');
+    assert.equal(get('discovery-pair').value,'');
+    c.receive('discoveries',job({task,episode:2}),c.version);
+    assert.equal(get('discovery-inspector').hidden,true,'polling cannot open the inspector');
+    inspect(get);
+    assert.equal(get('discovery-inspector').hidden,false);
+    assert.match(content(get('discovery-output')),/dog/);
+    c.receive('discoveries',job({task,episode:3}),c.version);
+    assert.equal(get('discovery-inspector').hidden,false,'polling preserves explicit inspection');
+    assert.equal(get('discovery-pair').value,'0:4');
+    inspect(get,'');
+    c.receive('discoveries',job({task,status:'completed'}),c.version);
+    assert.equal(get('discovery-inspector').hidden,true,'clearing Inspect remains effective after completion');
+    inspect(get);c.inspectPair(0,null);
+    assert.equal(get('discovery-inspector').hidden,true,'selecting another graph input closes the old measured details');
+    responses.push(job({task}));await c.start();
+    assert.equal(get('discovery-inspector').hidden,true,'new searches do not inherit inspection');
+  }
+});
 
 test('discovery defaults to the Analyze device while preserving edits within that analysis',async()=>{
   const f=setup(),{controller:c,get,explorer,responses,calls}=f;
@@ -42,10 +72,10 @@ test('Analyze gates discovery; labels are explicit and progress/inspection never
   assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body)),{embedding_id:'emb1',episodes:10,seed:42,device:'cpu',label_map:{0:'cat'}});
   assert.match(get('discovery-metrics').textContent,/Loss 0.120.*epsilon 0.960.*1 measured pairs.*2 selected-model calls/);
   assert.equal(get('discovery-cancel').hidden,false);assert.equal(get('finetune-panel').hidden,true);
-  assert.match(get('discovery-output').children[0].textContent,/dog/);assert.match(get('discovery-baseline').children[0].textContent,/cat/);
   assert.equal(f.focuses.length,0,'polling never takes over selection');
-  get('discovery-pair').events.change();assert.deepEqual(f.focuses[0],[0,4]);assert.equal(calls.length,1,'selection only highlights an existing point');
-  c.inspectPair(0,99);assert.match(get('discovery-components').textContent,/not been evaluated/);assert.equal(get('finetune-add').disabled,true);
+  inspect(get);assert.deepEqual(f.focuses[0],[0,4]);assert.equal(calls.length,1,'selection only highlights an existing point');
+  assert.match(get('discovery-output').children[0].textContent,/dog/);assert.match(get('discovery-baseline').children[0].textContent,/cat/);
+  c.inspectPair(0,99);inspect(get,'0:99');assert.match(get('discovery-components').textContent,/not been evaluated/);assert.equal(get('finetune-add').disabled,true);
   c.receive('discoveries',job({episode:2}),c.version);assert.match(get('discovery-components').textContent,/not been evaluated/,'new polls preserve the selected unvisited action');
 });
 
@@ -62,6 +92,7 @@ test('explicit reviewed targets, replace/remove examples and actual training/che
   const f=setup(),{controller:c,responses,calls,get}=f;f.ready();responses.push(job({status:'completed'}));await c.start();
   await c.startTraining();assert.equal(calls.length,1,'no implicit training from discovery completion');
   c.addExample();assert.match(get('discovery-error').textContent,/explicit desired target/);assert.equal(c.examples.length,0);
+  inspect(get);
   get('finetune-target').value='2';c.addExample();assert.equal(c.examples[0].target,2);
   get('finetune-target').value='exact class name';c.addExample();assert.equal(c.examples.length,1);assert.equal(c.examples[0].target,'exact class name');
   get('finetune-examples').children[0].children[1].events.click();assert.equal(c.examples.length,0);
@@ -100,7 +131,7 @@ test('domain settings submit explicit metric and real generation options',async(
 });
 
 test('training cancellation remains available after form invalidation and failures can retry',async()=>{
-  const f=setup(),{controller:c,responses,get}=f;f.ready();responses.push(job({status:'completed'}));await c.start();get('finetune-target').value='cat';c.addExample();
+  const f=setup(),{controller:c,responses,get}=f;f.ready();responses.push(job({status:'completed'}));await c.start();inspect(get);get('finetune-target').value='cat';c.addExample();
   responses.push({id:'train1',status:'running'});await c.startTraining();c.invalidate();
   assert.equal(get('finetune-cancel').hidden,false);assert.equal(get('finetune-panel').hidden,true);
   responses.push(new Error('temporary failure'));await c.cancel('finetunes');assert.equal(get('finetune-cancel').hidden,false);
@@ -111,6 +142,7 @@ function content(element){return [element.textContent,...element.children.map(co
 
 test('measured outcomes use readable predictions, summaries, generated images and named scores',async()=>{
   const f=setup(),{controller:c,get,responses}=f;f.ready();responses.push(job({status:'completed'}));await c.start();
+  inspect(get);
   assert.match(content(get('discovery-output')),/Prediction: dog \(class 3\).*Confidence: 30.0%/);
   assert.match(content(get('discovery-components')),/Severity 80.0%.*Target confidence drop 0.600/);
   assert.ok(!content(get('discovery-output')).includes('"class_id"'),'outputs do not expose API JSON');
@@ -128,10 +160,11 @@ test('policy inspector exposes mean, variation and tested-input coverage for mea
     {action_id:4,mean:.6,std:.02,evaluated_inputs:3},{action_id:9,mean:.2,std:.08,evaluated_inputs:0}
   ]};
   responses.push(job({status:'completed',policy_statistics:statistics}));await c.start();
+  inspect(get);
   assert.match(content(get('discovery-components')),/Mean DQN action preference 0\.600/);
   assert.match(content(get('discovery-components')),/Preference variation.*sample SD.*0\.0200/);
   assert.match(content(get('discovery-components')),/Original inputs.*4/);assert.match(content(get('discovery-components')),/Tested inputs.*3 \/ 4/);
-  c.inspectPair(0,9);assert.match(content(get('discovery-components')),/not been evaluated/);
+  c.inspectPair(0,9);inspect(get,'0:9');assert.match(content(get('discovery-components')),/not been evaluated/);
   assert.match(content(get('discovery-components')),/Mean DQN action preference 0\.200/);assert.match(content(get('discovery-components')),/Tested inputs.*0 \/ 4/);
   c.receive('discoveries',job({status:'completed',policy_statistics:{...statistics,input_count:1,actions:[{action_id:9,mean:.2,std:null,evaluated_inputs:1}]}}),c.version);
   assert.match(content(get('discovery-components')),/unavailable.*at least 2 original inputs/i,'one input never reports zero cross-input variation');
@@ -168,6 +201,7 @@ test('a delayed discovery GET cannot resurrect discovery or cancel fine-tuning p
     const discoveryVersion=c.version;let release;
     responses.push(()=>new Promise(resolve=>{release=resolve;}));const delayed=c.poll('discoveries',discoveryVersion);
     responses.push(job({status:'cancelled'}));await c.cancel('discoveries');
+    inspect(get);
     get('finetune-target').value='cat';c.addExample();
     const beforeValidation=c.version,beforeCalls=calls.length;get('finetune-lr').value='0.2';await c.startTraining();
     assert.equal(c.version,beforeValidation,'invalid settings do not advance the polling generation');assert.equal(calls.length,beforeCalls,'out-of-range learning rates are rejected before POST');

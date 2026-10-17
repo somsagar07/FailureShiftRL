@@ -40,6 +40,9 @@ class Analyses:
     def release_encoder(self):
         self.released += 1
 
+    def wait_for_expansion(self, identity, cancelled):
+        pass
+
     def discovery_node(self, identity, index, action, evaluator=None):
         self.node_requests.append((identity, index, action))
         return {'id': action, 'action': {'name': 'fixture'}, 'text': 'variant',

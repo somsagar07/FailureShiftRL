@@ -119,7 +119,14 @@
             <p id="embedding-meta" class="hint"></p>
             <details id="analysis-performance" hidden><summary id="analysis-performance-summary"></summary><dl id="analysis-timings" class="metric-rows"></dl><p class="hint">Files / download includes model file lookup and any downloads. Total includes input preparation and other analysis work. Queue wait is separate.</p></details>
             <div class="discovery-launch"><button id="find-failure" type="button" disabled>Find failure</button></div>
-            <p id="severity-legend" class="hint" hidden><span class="severity-gradient"></span> Low severity → high severity · gray: unevaluated · outlined pulse: current input/action. Original color averages observed pairs only.<br>Action size ranks variation of DQN action preference across original inputs: larger means less variation. <span class="unknown-std-key" aria-hidden="true"></span> Purple dashed boundary: standard deviation unavailable (neutral size). Dark outer ring: selected action. Originals keep their role sizes. Compare mean preference and tested-input coverage in the inspector; variation is not calibrated failure confidence.</p>
+            <ul id="severity-legend" class="discovery-legend" aria-label="Discovery graph legend" hidden>
+              <li title="Measured severity. Original inputs average their observed action pairs."><span>Severity</span> Low <span class="severity-gradient" aria-hidden="true"></span> High</li>
+              <li><i class="legend-dot" aria-hidden="true"></i>Unevaluated</li>
+              <li><i class="legend-dot legend-current" aria-hidden="true"></i>Current</li>
+              <li><i class="legend-dot legend-selected" aria-hidden="true"></i>Selected</li>
+              <li title="Standard deviation is unavailable. The action keeps a neutral size."><i class="legend-dot unknown-std-key" aria-hidden="true"></i>SD unavailable</li>
+              <li title="Action size ranks DQN preference variation across original inputs, not failure confidence. Original input sizes stay fixed."><span class="legend-sizes" aria-hidden="true"><i></i><i></i></span>Larger = lower variation</li>
+            </ul>
             <p class="hint embedding-help">Drag to rotate · Shift-drag to pan · scroll to zoom · click a point to explore</p>
           </div>
         </div>
@@ -136,8 +143,8 @@
           <p id="discovery-status" role="status"></p><p id="discovery-error" class="error" role="alert" hidden></p><p id="discovery-metrics" class="hint"></p><p id="discovery-criterion" class="hint"></p>
           <progress id="discovery-progress" max="100" value="0" hidden></progress>
           <div id="discovery-artifacts"></div>
-          <div id="discovery-records" hidden><label for="discovery-pair">Inspect a measured input/action</label><select id="discovery-pair"></select></div>
-          <div id="discovery-inspector" hidden><h3>Measured model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">Mean preference and sample standard deviation describe DQN action preferences across original inputs. Low variation alone does not establish failure; compare mean preference and tested-input coverage. These are not calibrated failure probabilities. At least two original inputs are required to measure variation. Unvisited actions have no measured failure score.</p></div>
+          <div id="discovery-records" hidden><label for="discovery-pair">Inspect</label><select id="discovery-pair"><option value="">Select an input/action…</option></select></div>
+          <div id="discovery-inspector" hidden><h3>Model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">Preference variation is not failure confidence.</p></div>
           <details id="finetune-panel" hidden><summary>Fine-tune reviewed examples</summary><p class="hint">Add explicit desired targets for visited actions. Training begins only when you press Start fine-tuning. Metrics describe reviewed training examples; evaluate the saved checkpoint separately.</p><label id="finetune-target-label" for="finetune-target">Desired class ID or exact label</label><textarea id="finetune-target" rows="3"></textarea><button id="finetune-add" type="button">Add selected pair</button><ul id="finetune-examples"></ul><div class="compact-row"><label>Epochs <input id="finetune-epochs" type="number" min="1" max="100" value="1"></label><label>Learning rate <input id="finetune-lr" type="number" min="0.00000001" max="0.1" step="any" value="0.001"></label></div><div class="job-buttons"><button id="finetune-start" type="button" disabled>Start fine-tuning</button></div><p id="finetune-status" role="status"></p><div id="finetune-checkpoint" hidden><label for="finetune-path">Saved local model</label><input id="finetune-path" type="text" readonly><button id="finetune-use" type="button">Select checkpoint for Analyze</button></div></details>
         </section>
         <div id="graph-wrap" class="graph-wrap" hidden>

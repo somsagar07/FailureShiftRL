@@ -72,12 +72,13 @@ test('new and cached action expansions preserve the camera in every domain',asyn
   }
 });
 
-test('live measured actions become selectable without inference and polling preserves selection in every domain',async()=>{
+test('parent clicks request full expansions during discovery and polling preserves selection in every domain',async()=>{
   for(const task of ['classification','summarization','generation']) {
     const f=setup(task),{explorer:e,get,canvas,discovery:d}=f;
-    f.receive(f.report());await e.focus(0);
-    assert.match(get('embedding-focus').textContent,/waiting for measured actions/i);
-    assert.equal(f.calls.length,0,'an active discovery does not queue an expansion behind inference');
+    f.receive(f.report());const focusing=e.focus(0);await flush();
+    assert.equal(f.calls.length,1,`${task}: an active discovery must still expand a clicked parent`);
+    assert.equal(f.calls[0].url,'/api/embeddings/embedding/expand');
+    f.pending.shift()({...f.expansion(),status:'running',nodes:[],completed:0,total:3});await focusing;
     moveCamera(e.view);const before=camera(e.view);
     f.receive(f.report([f.measured(0,[0,.5,0])]));
     assert.equal(e.view.nodes.length,1,`${task}: completed measurements appear in the focused graph`);
@@ -90,14 +91,16 @@ test('live measured actions become selectable without inference and polling pres
     canvas.fire('pointerup',down);
     assert.equal(e.view.selectedAction,0,`${task}: polling during a click cannot lose the selected action`);
     assert.equal(d.selected,'0:0');assert.equal(f.inspected.at(-1)[1].id,0);
+    assert.equal(get('discovery-inspector').hidden,true,'graph clicks keep measured outputs closed');
     assert.equal(get('embedding-action').value,'0');
     f.receive(f.report([f.measured(0,[0,.5,0]),f.measured(1,[0,-.5,0]),f.measured(2,[.5,0,0])],{episode:3,current:{input_index:0,action_id:2}}));
     assert.equal(e.view.selectedAction,0,'new RL actions do not take over graph selection');
     assert.equal(d.selected,'0:0');assert.equal(get('embedding-action').value,'0');
     assert.deepEqual(camera(e.view),before,'measurement updates preserve all camera state');
-    assert.equal(f.calls.length,0,'selection and progress do not request model inference');
+    assert.equal(f.calls.length,1,'progress and action selection do not start additional expansions');
     get('embedding-action').value='1';get('embedding-action').events.change();
     assert.equal(e.view.selectedAction,1);assert.equal(d.selected,'0:1');assert.equal(f.inspected.at(-1)[1].id,1);
+    await e.receiveExpansion(f.expansion(0,[f.node(0),f.node(1),f.node(2)]),e.run,e.selection);
     await e.focus(0);assert.equal(e.view.selectedAction,null);assert.equal(e.view.nodes.length,3);
     f.receive(f.report([f.measured(0,[0,.5,0])],{episode:4}));
     assert.equal(d.selected,null,'polling preserves an explicitly selected original');
@@ -124,11 +127,11 @@ test('measured-pair navigation reuses nodes across inputs and remains usable for
 test('missing positions stay unplotted and completed partial caches can still expand fully',async()=>{
   const f=setup(),{explorer:e}=f;
   const invalid=f.measured(1,[NaN,0,0]);
-  f.receive(f.report([{input_index:0,action_id:0,visits:1,severity:.7},invalid]));await e.focus(0);
+  f.receive(f.report([{input_index:0,action_id:0,visits:1,severity:.7},invalid]));const focusing=e.focus(0);await flush();
   assert.equal(e.view.nodes.length,0,'severity records cannot invent graph coordinates');
   f.receive(f.report([f.measured(0,[0,.5,0])],{status:'completed'}));
   assert.equal(e.view.nodes.length,1);
-  const focusing=e.focus(0);await flush();assert.equal(f.calls.length,1,'a measured subset does not suppress a later full expansion');
+  assert.equal(f.calls.length,1,'a measured subset does not suppress full expansion during search');
   assert.equal(e.view.nodes.length,1,'measured actions stay available while the full expansion runs');
   e.inspect(e.view.nodes[0]);moveCamera(e.view);const before=camera(e.view);
   f.pending.shift()(f.expansion(0,[f.node(0,[0,.5,0]),f.node(1,[0,-.5,0])]));await focusing;
@@ -146,9 +149,50 @@ test('starting discovery preserves a graph action selected while its request is 
   const starting=d.start();e.inspect(e.expansion.nodes[1]);
   f.pending.shift()(f.report([f.measured(0)]));await starting;
   assert.equal(e.view.selectedAction,1);assert.equal(d.selected,'0:1','start acknowledgement preserves the current graph action');
-  assert.match(get('discovery-components').textContent,/not been evaluated/);
+  assert.equal(get('discovery-inspector').hidden,true,'discovery start does not open the graph selection’s outputs');
   f.receive(f.report([f.measured(0)],{episode:2,current:{input_index:0,action_id:0}}));
   assert.equal(e.view.selectedAction,1);assert.equal(d.selected,'0:1');
+});
+
+test('partial expansion batches appear during search and survive live measurements without camera changes',async()=>{
+  const f=setup(),{explorer:e,get}=f;
+  f.receive(f.report());const focusing=e.focus(0);await flush();
+  assert.equal(f.calls.length,1);
+  f.pending.shift()({...f.expansion(),status:'running',nodes:[],completed:0,total:3});await focusing;
+  moveCamera(e.view);const before=camera(e.view);
+  const progress={...f.expansion(0,[f.node(0),f.node(1)]),status:'running',completed:2,total:3,phase:'embedding transformations'};
+  await e.receiveExpansion(progress,e.run,e.selection);
+  assert.equal(e.view.nodes.length,2,'computed action batches are immediately selectable');
+  assert.equal(e.expansionCache.has(0),false,'partial batches cannot masquerade as completed expansions');
+  e.inspect(e.view.nodes[1]);
+  f.receive(f.report([f.measured(0)],{episode:2}));
+  assert.equal(e.view.nodes.length,2,'discovery polling cannot replace expanded nodes with a smaller measured subset');
+  assert.equal(e.view.selectedAction,1);assert.equal(get('embedding-action').value,'1');
+  assert.equal(get('discovery-inspector').hidden,true);
+  assert.deepEqual(camera(e.view),before);
+  await e.receiveExpansion(f.expansion(0,[f.node(0),f.node(1),f.node(2)]),e.run,e.selection);
+  assert.equal(e.view.nodes.length,3);assert.equal(e.view.selectedAction,1);
+  assert.equal(e.expansionCache.has(0),true);
+  assert.deepEqual(camera(e.view),before);
+});
+
+test('returning to a partially expanded parent keeps its cached nodes and selection while batches restart',async()=>{
+  const f=setup(),{explorer:e,get}=f;
+  f.receive(f.report());const first=e.focus(0);await flush();
+  assert.equal(f.calls.length,1);
+  f.pending.shift()({...f.expansion(0,[f.node(0),f.node(1),f.node(2)]),status:'running',completed:3,total:4});await first;
+  const other=e.focus(1);await flush();f.pending.shift()(f.expansion(1,[f.node(0,[1,.5,0],1)]));await other;
+  const returning=e.focus(0);await flush();
+  assert.equal(e.view.nodes.length,3,'returning shows the previously computed nodes immediately');
+  e.inspect(e.view.nodes[2]);moveCamera(e.view);const before=camera(e.view);
+  f.pending.shift()({...f.expansion(0,[f.node(0)]),status:'running',completed:1,total:4});await returning;
+  assert.equal(e.view.nodes.length,3,'a restarted prefix cannot discard valid cached coordinates');
+  assert.equal(e.view.selectedAction,2);assert.equal(get('embedding-action').value,'2');
+  f.receive(f.report([f.measured(0)],{episode:2}));
+  assert.equal(e.view.nodes.length,3);assert.equal(e.view.selectedAction,2);
+  assert.deepEqual(camera(e.view),before);
+  await e.receiveExpansion(f.expansion(0,[f.node(0),f.node(1),f.node(2),f.node(3)]),e.run,e.selection);
+  assert.equal(e.view.nodes.length,4);assert.equal(e.view.selectedAction,2);
 });
 
 (async()=>{let failures=0;for(const {name,fn} of tests){try{await fn();console.log('ok - '+name);}catch(error){failures++;console.error('not ok - '+name+'\n'+error.stack);}}if(failures)process.exitCode=1;else console.log(`${tests.length} live embedding integration tests passed`);})();
