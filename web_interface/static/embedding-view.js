@@ -286,7 +286,9 @@ class EmbeddingView {
     const focal = this.height / (2 * Math.tan(Math.PI / 8));
     const focused = kind === 'sample' && data.index === this.focusIndex;
     const selected = kind === 'action' ? data.id === this.selectedAction : focused && this.selectedAction === null;
-    const baseRadius=kind==='action'&&this.discovery?(this.actionRadii.get(data.id)??3.5):(selected ? 8 : focused ? 7 : kind === 'action' ? 6 : 5);
+    // Missing variation uses the midpoint of the 4–11 size range, never an
+    // apparent high/low variation estimate. Its boundary carries missingness.
+    const baseRadius=kind==='action'&&this.discovery?(this.actionRadii.get(data.id)??7.5):(selected ? 8 : focused ? 7 : kind === 'action' ? 6 : 5);
     const radius = Math.max(2, Math.min(18, baseRadius * this.fitDistance / depth));
     return {data, kind, depth, selected, focused, radius,
       x: this.width / 2 + this.pan.x + x * focal / depth,
@@ -321,17 +323,26 @@ class EmbeddingView {
       ctx.fillStyle = this.discovery?this.severityColor(node.kind==='sample'?this.severities.get(node.data.index):this.measured.get(`${this.focusIndex}:${node.data.id}`)):(node.kind === 'sample' ? '#336aa3' : '#b06c36');
       ctx.globalAlpha = this.focusIndex !== null && node.kind === 'sample' && !node.focused ? 0.22 : 1;
       ctx.fill();
-      // A light rim separates overlapping points; selection gets a darker border.
-      ctx.strokeStyle = node.selected ? '#202a35' : '#ffffff';
-      ctx.lineWidth = node.selected ? 2.5 : 1.5;
-      ctx.setLineDash(this.discovery&&node.kind==='action'&&!this.actionRadii.has(node.data.id)?[2,2]:[]);
+      // Keep the missing-SD boundary visible even when selected or pulsing.
+      const unknownVariation = this.discovery && node.kind === 'action' && !this.actionRadii.has(node.data.id);
+      const selectedSample = node.selected && node.kind === 'sample';
+      ctx.strokeStyle = unknownVariation ? '#7c3aed' : selectedSample ? '#202a35' : '#ffffff';
+      ctx.lineWidth = unknownVariation ? 2 : selectedSample ? 2.5 : 1.5;
+      ctx.setLineDash(unknownVariation ? [2, 2] : []);
       ctx.stroke();
       ctx.setLineDash([]);
+      if (node.selected && node.kind === 'action') {
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius + 3.5, 0, Math.PI * 2);
+        ctx.strokeStyle = '#202a35';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
       const current=this.discovery?.current;
       const active=this.discovery&&['queued','running'].includes(this.discovery.status)&&current&&
         (node.kind==='sample'?node.data.index===current.input_index:this.focusIndex===current.input_index&&node.data.id===current.action_id);
       if(active) {
-        const pulse=2+2*(1+Math.sin(Date.now()/220));
+        const pulse=(node.selected&&node.kind==='action'?4:0)+2+2*(1+Math.sin(Date.now()/220));
         ctx.beginPath();ctx.arc(node.x,node.y,node.radius+pulse,0,Math.PI*2);
         ctx.strokeStyle='#203f72';ctx.lineWidth=2;ctx.globalAlpha=0.85;ctx.stroke();
       }

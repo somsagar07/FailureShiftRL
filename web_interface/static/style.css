@@ -48,6 +48,7 @@ input[type=checkbox] { accent-color: #2863a8; }
 .embedding-legend i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .sample-dot { background: #5583b5; }
 .action-dot { background: #cc8b4d; margin-left: 10px; }
+.unknown-std-key { display: inline-block; width: 9px; height: 9px; border: 2px dashed #7c3aed; border-radius: 50%; vertical-align: middle; }
 .embedding-buttons { display: flex; flex-wrap: wrap; gap: 5px; }
 .embedding-buttons button { font-size: 12px; border-color: #d8e0e8; background: white; border-radius: 5px; }
 #embedding-canvas { display: block; width: 100%; height: 540px; max-height: 70vh; outline-offset: -3px; }

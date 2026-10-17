@@ -423,16 +423,52 @@ test('action size ranks cross-input preference variation, preserves ties and dis
   const byId=id=>view.projected.find(node=>node.kind==='action'&&node.data.id===id);
   assert.ok(byId(0).radius>byId(1).radius&&byId(1).radius>byId(2).radius,'higher variation produces smaller actions at the same depth');
   assert.equal(byId(1).radius,byId(3).radius,'equal variation cannot acquire an arbitrary size order');
-  assert.ok(byId(4).radius<byId(2).radius,'unknown variation cannot appear maximally certain');
+  assert.ok(byId(0).radius>byId(4).radius&&byId(4).radius>byId(2).radius,'unknown variation uses a neutral size, not either end of the variation ranking');
   assert.equal(view.projected.find(node=>node.kind==='sample'&&node.data.index===0).radius,originalRadius,'original nodes remain role markers');
   assert.deepEqual(view.projected.map(node=>({kind:node.kind,id:node.data.id??node.data.index,x:node.x,y:node.y})),positions);
   assert.equal(circles(canvas)[view.projected.indexOf(byId(0))].color,view.severityColor(.9),'size does not change measured-severity color');
   assert.equal(circles(canvas)[view.projected.indexOf(byId(2))].color,view.severityColor(.1));
-  assert.ok(canvas.context.strokes.some(stroke=>stroke.dashes.length&&stroke.path.some(p=>p.x===byId(4).x&&p.y===byId(4).y)),'unknown variation has a distinct rim');
+  const rim=id=>canvas.context.strokes.find(stroke=>stroke.path.some(p=>p.x===byId(id).x&&p.y===byId(id).y&&p.radius===byId(id).radius));
+  assert.ok(rim(4).dashes.length,'unknown variation has a dashed rim');
+  assert.notEqual(rim(4).color,rim(0).color,'unknown and measured variation have different boundary colors');
   const selectedRadius=byId(2).radius;view.selectAction(2);assert.equal(byId(2).radius,selectedRadius,'selection emphasis cannot override uncertainty size');
   const hovered=byId(0);canvas.fire('pointermove',{clientX:canvas.box.left+hovered.x,clientY:canvas.box.top+hovered.y});
   assert.match(canvas.title,/mean DQN action preference: 0\.600/i);assert.match(canvas.title,/sample SD.*0\.0200/i);
   assert.match(canvas.title,/4 original inputs/i);assert.match(canvas.title,/tested inputs: 3\/4/i);assert.match(canvas.title,/not calibrated/i);
+});
+
+test('selection and live updates preserve the unknown boundary; a measured zero SD is known',()=>{
+  const {view,canvas}=setup();
+  view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setExpansion(0,[action(0,[0,.5,0]),action(1,[.5,.5,0])]);
+  const byId=id=>view.projected.find(node=>node.kind==='action'&&node.data.id===id);
+  const strokes=id=>canvas.context.strokes.filter(stroke=>stroke.path.some(p=>p.x===byId(id).x&&p.y===byId(id).y&&'radius' in p));
+  const rim=id=>strokes(id).find(stroke=>stroke.path.some(p=>p.radius===byId(id).radius));
+  const job={status:'running',records:[{input_index:0,action_id:0,severity:.9}],current:{input_index:0,action_id:0}};
+  view.setDiscovery(job);
+  const unknownColor=rim(0).color,neutralRadius=byId(0).radius;
+  click(canvas,byId(0));
+  assert.equal(view.selectedAction,0);
+  assert.equal(byId(0).radius,neutralRadius,'selection does not imply a change in variation');
+  assert.equal(rim(0).color,unknownColor,'selection cannot erase the unknown boundary color');
+  assert.ok(rim(0).dashes.length);
+  assert.ok(strokes(0).some(stroke=>!stroke.dashes.length&&stroke.color!==unknownColor&&stroke.path.some(p=>p.radius>byId(0).radius)),'selection remains visible outside the unknown boundary');
+  const statistics={input_count:2,policy_updates:1,actions:[{action_id:0,mean:.6,std:null},{action_id:1,mean:.4,std:0}]};
+  view.setDiscovery({...job,policy_statistics:statistics});
+  assert.equal(view.selectedAction,0);
+  assert.equal(rim(0).color,unknownColor);
+  assert.notEqual(rim(1).color,unknownColor,'a genuine zero SD must not be treated as missing');
+  assert.equal(rim(1).dashes.length,0);
+  view.setDiscovery({...job,status:'completed',policy_statistics:statistics});
+  assert.equal(rim(0).color,unknownColor,'completion preserves missingness');
+  assert.ok(strokes(0).some(stroke=>!stroke.dashes.length&&stroke.color!==unknownColor&&stroke.path.some(p=>p.radius>byId(0).radius)),'selection is visible even after the training pulse stops');
+  view.setDiscovery({...job,status:'completed',policy_statistics:{...statistics,actions:[{action_id:0,mean:.6,std:0},{action_id:1,mean:.4,std:.1}]}});
+  assert.equal(view.selectedAction,0);
+  assert.notEqual(rim(0).color,unknownColor,'newly available statistics replace the unknown boundary');
+  assert.equal(rim(0).dashes.length,0);
+  assert.equal(circles(canvas)[view.projected.indexOf(byId(0))].color,view.severityColor(.9),'changing statistics does not change measured severity');
+  view.setDiscovery(null);
+  assert.ok(!canvas.context.strokes.some(stroke=>stroke.dashes.length),'leaving discovery clears the variation indicator');
 });
 
 test('single-input and untrained policy statistics remain unknown; tied statistics use a neutral size',()=>{

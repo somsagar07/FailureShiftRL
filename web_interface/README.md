@@ -203,14 +203,22 @@ mean preference, sample standard deviation, original-input count, and the number
 inputs actually tested with that action. This follows the original experiment's
 `softmax(Q)` summary, with the size ordering reversed. The mean is a relative policy
 preference, not a failure probability; the spread is not calibrated model confidence.
-Equal spreads have equal sizes, and unknown spread uses a small outlined sphere.
-Input parents keep their own visual sizes and measured-severity colors.
+Equal spreads have equal sizes. Unknown spread uses a neutral-size sphere with a
+**purple dashed boundary**, so it cannot be mistaken for measured high or low
+variation. A measured zero standard deviation is known, not missing. Selecting an
+action adds a separate dark outer ring, preserving its boundary and size during
+live updates. Input parents keep their own visual sizes and measured-severity colors.
 
 Statistics use one current DQN checkpoint over the original input embeddings and
 refresh periodically during search and at completion. Cached repeats do not add
 statistical samples. Before the first optimizer update, there are no learned policy
 statistics. With a single original image, article, or prompt, the spread is unknown;
 the current summarization and generation workspaces each accept one original input.
+The purple boundary remains in those cases, including after training finishes.
+This describes input-to-input variation using one DQN; low variation alone does
+not establish a reliable failure, and high variation can reveal input-specific
+failures. Judge candidates using their measured outputs and test them on fresh
+inputs before drawing conclusions about generalization.
 
 ## Discovery and rewards
 
