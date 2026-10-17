@@ -14,7 +14,7 @@ const datasetPresets = [
 ];
 let catalog, task='classification', preview=null, busy=false;
 let previewRequest=0,previewTimer=null;
-let dataset=null, datasetLoading=false, imageIndex=0, imageOffset=0;
+let dataset=null, datasetLoading=false, imageIndex=0, imageOffset=0, imageItems=[];
 let pageRequest=0, pageLoading=false;
 const selections={}, textInputs={};
 const embeddingExplorer=new EmbeddingExplorer({api,onInspect:inspectEmbedding,onSelectInput:syncDatasetImage,describeAction:actionDescription,
@@ -26,7 +26,7 @@ discovery=new DiscoveryController({api,explorer:embeddingExplorer,onChange:()=>u
   $('model-source').value='local';$('model-name').value=path;modelChoiceChanged();
   $('model-status').textContent='Saved checkpoint selected. Click Analyze to evaluate it.';
 }});
-embeddingExplorer.onReady=job=>discovery.ready(job);
+embeddingExplorer.onReady=job=>{discovery.ready(job);showDatasetSample();};
 embeddingExplorer.onInspectPair=(index,action)=>discovery.inspectPair(index,action);
 embeddingExplorer.isDiscoveryActive=()=>Boolean(discovery.active);
 
@@ -75,6 +75,7 @@ function clearPreview() {
   discovery.invalidate();embeddingExplorer.reset();
   preview=null;show('graph-wrap',false);show('details',false);
   $('preview-status').textContent='Click Analyze to explore model embeddings and action combinations.';
+  showDatasetSample();
   updateControls();
 }
 function renderActions() {
@@ -162,8 +163,18 @@ function actionDescription(action) {
 }
 function displayInput(container,input) {
   const el=input.image?element('img'):element('pre',input.text);
-  if(input.image){el.src=input.image;el.alt='Input preview';el.addEventListener('error',()=>error('Could not read this dataset image. Check the file/image column or choose another image.'));}
+  if(input.image){el.src=input.image;el.alt=input.name||'Input preview';el.addEventListener('error',()=>{if($(container).children[0]===el)error('Could not read this dataset image. Check the file/image column or choose another image.');});}
   $(container).replaceChildren(el);
+}
+function showDatasetSample() {
+  const item=imageItems.find(item=>item.index===imageIndex);
+  const visible=task==='classification'&&Boolean(dataset)&&Boolean(item)&&!embeddingExplorer.job;
+  show('dataset-preview',visible);
+  if(!visible){$('dataset-preview-image').replaceChildren();$('dataset-preview-name').textContent='';return;}
+  const name=`${item.index+1}. ${item.name}`;
+  displayInput('dataset-preview-image',{image:`/datasets/${dataset.id}/images/${imageIndex}.png`,name});
+  $('dataset-preview-name').textContent=name;
+  $('preview-status').textContent='';
 }
 function inspectEmbedding(original,node,config) {
   if(!original){show('details',false);return;}
@@ -215,7 +226,7 @@ $('reset-actions').addEventListener('click',()=>{delete selections[task];clearPr
 document.querySelectorAll('.domain').forEach(button=>button.addEventListener('click',()=>setTask(button.dataset.task)));
 function clearDataset() {
   pageRequest++;pageLoading=false;
-  dataset=null;imageIndex=0;imageOffset=0;clearPreview();show('input-browser',false);
+  dataset=null;imageIndex=0;imageOffset=0;imageItems=[];clearPreview();show('input-browser',false);
   $('image-select').replaceChildren();$('image-page').textContent='';
   $('dataset-status').textContent='Select and load your input data.';updateControls();
 }
@@ -233,11 +244,13 @@ async function loadImagePage(offset,selectedIndex=offset) {
   try {
     const page=await api(`/api/datasets/${datasetId}/items?offset=${offset}&limit=100`);
     if(request!==pageRequest||dataset?.id!==datasetId||task!=='classification')return false;
+    imageItems=page.items;
     imageOffset=page.offset;imageIndex=page.items.some(item=>item.index===selectedIndex)?selectedIndex:page.items[0].index;
     $('image-select').replaceChildren(...page.items.map(item=>{const option=element('option',`${item.index+1}. ${item.name}`);option.value=String(item.index);return option;}));
     $('image-select').value=String(imageIndex);
     $('image-page').textContent=`${offset+1}–${offset+page.items.length} of ${page.count}`;
     show('input-browser',true);
+    showDatasetSample();
     return true;
   } catch(e) {
     if(request===pageRequest&&dataset?.id===datasetId)throw e;
@@ -293,7 +306,9 @@ $('folder-files').addEventListener('change',async()=>{
   finally{datasetLoading=false;updateControls();$('folder-files').value='';}
 });
 async function showSelectedImage() {
-  if(task==='classification'&&preview)await embeddingExplorer.focus(imageIndex);
+  if(task!=='classification')return;
+  if(embeddingExplorer.job)await embeddingExplorer.focus(imageIndex);
+  else showDatasetSample();
 }
 $('image-select').addEventListener('change',async()=>{imageIndex=Number($('image-select').value);await showSelectedImage();});
 $('previous-images').addEventListener('click',async()=>{try{if(await loadImagePage(Math.max(0,imageOffset-100)))await showSelectedImage();}catch(e){error(e.message);}});

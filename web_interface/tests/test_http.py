@@ -149,6 +149,13 @@ class HTTPTests(unittest.TestCase):
             time.sleep(.01)
             dataset = json.loads(self.request('/api/datasets/'+dataset['id'])[1])
         self.assertEqual(dataset['status'], 'ready')
+        # Dataset samples are viewable before creating any analysis or preview.
+        for index, color in enumerate(((255, 0, 0), (0, 0, 255))):
+            code, pixels = self.request(f'/datasets/{dataset["id"]}/images/{index}.png')
+            self.assertEqual(code, 200)
+            self.assertEqual(Image.open(io.BytesIO(pixels)).getpixel((100, 100)), color)
+        self.assertEqual(self.request(f'/datasets/{dataset["id"]}/images/2.png')[0], 400)
+        self.assertEqual(self.request('/datasets/'+'0'*32+'/images/0.png')[0], 404)
         config = {'dataset_id':dataset['id'], 'action_space':{'rotation':[0], 'darkness':[], 'saturation':[]}}
         code, body = self.request('/api/previews', 'POST', body=config)
         self.assertEqual(code, 202)

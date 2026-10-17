@@ -3,6 +3,7 @@
 import argparse
 import copy
 import errno
+import io
 import json
 import mimetypes
 import random
@@ -230,6 +231,12 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                     if match[2]:
                         return self.send(200, previews.datasets.page(match[1], int(query.get('offset', ['0'])[0]), int(query.get('limit', ['100'])[0])))
                     return self.send(200, previews.datasets.get(match[1]))
+                match = re.fullmatch(r'/datasets/([0-9a-f]{32})/images/(\d+)\.png', path)
+                if match:
+                    with previews.datasets.image(match[1], int(match[2])) as image:
+                        buffer = io.BytesIO()
+                        image.save(buffer, format='PNG')
+                        return self.send(200, buffer.getvalue(), 'image/png')
                 match = re.fullmatch(r'/api/(previews|models)/([0-9a-f]{32})', path)
                 if match:
                     value = previews.get(match[2], int(query.get('input', ['0'])[0])) if match[1] == 'previews' else models.get(match[2])

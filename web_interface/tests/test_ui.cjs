@@ -100,6 +100,15 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   await get('load-dataset').events.click();await flush();
   assert.equal(get('generate').disabled,true,'classification embeddings require a selected model');
   assert.ok(get('dataset-summary').textContent.includes('5025'));
+  assert.equal(get('dataset-preview').hidden,false,'loading data shows its first sample before Analyze or model selection');
+  assert.equal(get('dataset-preview-image').children[0].src,`/datasets/${datasetId}/images/0.png`);
+  assert.equal(get('dataset-preview-name').textContent,'1. cat.png');
+  assert.equal(get('preview-status').textContent,'','the selected sample replaces the Analyze instruction');
+  get('image-select').value='1';await get('image-select').events.change();
+  assert.equal(get('dataset-preview-image').children[0].src,`/datasets/${datasetId}/images/1.png`);
+  assert.equal(get('dataset-preview-name').textContent,'2. dog.png');
+  assert.equal(requests.some(request=>request.url==='/api/previews'||request.url==='/api/embeddings'),false,'browsing samples does not run analysis');
+  get('image-select').value='0';await get('image-select').events.change();
   get('model-source').value='huggingface';get('model-source').events.change();
   assert.equal(get('hf-model-fields').hidden,false);
   assert.equal(get('model-name-fields').hidden,true);
@@ -112,6 +121,7 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   assert.equal(embeddingRequested.preview_id,job.id);
   assert.equal(modelRequested,undefined,'embedding loading handles model download without a second snapshot job');
   assert.equal(get('embedding-wrap').hidden,false);
+  assert.equal(get('dataset-preview').hidden,true,'the completed graph replaces the raw sample preview');
   assert.equal(get('graph-wrap').hidden,true);
   assert.equal(get('details').hidden,true,'the overview starts with all originals, before selecting an image');
   get('image-select').value='0';await get('image-select').events.change();await flush();
@@ -127,6 +137,8 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   get('embedding-action').value='0';get('embedding-action').events.change();
   assert.equal(get('selected-view').children[0].src,'/dog-changed.png');
   get('model-preset').value='other';get('model-preset').events.change();
+  assert.equal(get('dataset-preview').hidden,false,'invalidating analysis restores the currently selected sample');
+  assert.equal(get('dataset-preview-image').children[0].src,`/datasets/${datasetId}/images/1.png`);
   assert.equal(get('model-name-fields').hidden,false);
   assert.equal(get('model-name').required,true);
   get('model-name').value='org/model';get('model-name').events.input();
@@ -136,6 +148,7 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   const pendingPage=get('next-images').events.click();await flush();
   const paginationDisabledWhileLoading=get('next-images').disabled;
   get('dataset-source').value='huggingface';get('dataset-source').events.change();
+  assert.equal(get('dataset-preview').hidden,true,'changing datasets clears the previous image immediately');
   assert.equal(get('dataset-name-fields').hidden,true);
   await get('load-dataset').events.click();await flush();
   assert.deepEqual(datasetRequested,{source:'huggingface',name:'hf-internal-testing/cats_vs_dogs_sample',split:'train',config:'',column:'image'});
@@ -143,6 +156,8 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   assert.equal(get('image-select').children.length,1,'a delayed folder response cannot replace the new dataset');
   assert.equal(get('image-select').children[0].textContent,'1. Image 1');
   assert.equal(get('image-select').value,'0');
+  assert.equal(get('dataset-preview').hidden,false);
+  assert.equal(get('dataset-preview-image').children[0].src,`/datasets/${hfDatasetId}/images/0.png`,'a delayed old dataset page cannot replace the selected sample');
   assert.equal(get('image-page').textContent,'1–1 of 1');
   assert.equal(get('next-images').disabled,true);
   assert.equal(get('graph-wrap').hidden,true,'changing the dataset clears the old graph');
@@ -160,6 +175,7 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   await get('load-dataset').events.click();await flush();
   assert.deepEqual(datasetRequested,{source:'huggingface',name:'org/photos',split:'test',config:'default',column:'picture'});
   domains.find(button=>button.dataset.task==='summarization').events.click();
+  assert.equal(get('dataset-preview').hidden,true,'text workspaces never show a retained image sample');
   assert.equal(get('generate').textContent,'Analyze','text workspaces use the same embedding workflow');
   assert.equal(get('viewer-title').textContent,'Embedding space');
   assert.equal(get('input-browser').hidden,true);
@@ -250,6 +266,7 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   domains.find(button=>button.dataset.task==='classification').events.click();
   assert.equal(get('embedding-wrap').hidden,true);
   assert.equal(get('input-browser').hidden,false,'switching back retains the image dataset');
+  assert.equal(get('dataset-preview').hidden,false,'returning to classification restores its selected sample');
   get('model-name').value='/models/vision';get('model-name').events.input();
   get('analysis-device').value='cuda';get('analysis-device').events.change();
   await get('preview-form').events.submit({preventDefault(){}});await flush();
@@ -313,6 +330,7 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   assert.equal(selectedGraphNode,null,'the original input remains selectable');
   console.log('PASS: three selected action toggles update counts, validation, and submitted transformations');
   console.log('PASS: selected dataset and selected image reach the generated graph');
+  console.log('PASS: selected dataset samples preview before Analyze and follow selection, invalidation and workspace changes');
   console.log('PASS: classification loads actual model embedding jobs and selection expands the correct image');
   console.log('PASS: action selection shows original/changed input, all action values and cosine similarity');
   console.log('PASS: all 125 combinations and their sample identities remain available in the graph');

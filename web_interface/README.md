@@ -71,7 +71,8 @@ only on the server's loopback interface.
    and select a preset model. **Other…** reveals a custom model ID field.
    All three domains require a compatible model to compute embeddings.
 3. For classification, select **Local folder** or **Hugging Face dataset**, then load
-   the input data. For the other domains, enter text or a prompt template.
+   the input data. The selected image appears immediately; use **Dataset image**
+   to browse samples before Analyze. For the other domains, enter text or a prompt template.
 4. **Rotation**, **Darkness**, and **Saturation** start checked. Uncheck an action to
    remove it; its values dropdown becomes disabled. Each selected action can use
    all fixed values or one value. Other domains offer their own fixed action choices.
