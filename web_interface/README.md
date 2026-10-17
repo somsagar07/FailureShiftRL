@@ -14,8 +14,9 @@ bash run.sh
 ```
 
 The launcher creates its own `.venv` and installs missing requirements before
-starting the server. First setup needs internet access to PyPI and the PyTorch CPU
-wheel index. It checks the required imports, then opens a browser on this computer.
+starting the server. First setup needs internet access to PyPI and the official
+PyTorch wheel index. Setup detects NVIDIA hardware and selects a compatible CUDA
+build; computers without it use CPU. It checks the required imports, then opens a browser on this computer.
 Keep the terminal open. Press
 Ctrl+C to stop. After code changes, stop and restart the server, then refresh the
 browser. If port 8000 is occupied, use `bash run.sh --port 8001`.
@@ -33,8 +34,12 @@ bash setup.sh
 
 The launcher always uses `.venv/bin/python`, so packages from other projects or
 your Conda base environment do not affect this app. Setup also runs `pip check`
-for dependency conflicts. Setup installs CPU-only PyTorch if it is missing;
-no GPU is required. Transformers is constrained to the compatible 4.x API.
+for dependency conflicts. To repair an existing CPU-only installation on an NVIDIA
+machine, run `bash setup.sh --cuda`, then restart the server. Verify it with
+`.venv/bin/python -I check_environment.py --require-cuda`; this performs a real GPU
+tensor operation. `bash setup.sh --cpu` explicitly installs CPU wheels;
+`bash setup.sh --dry-run` previews the installation decision. No GPU is required.
+Transformers is constrained to the compatible 4.x API.
 Diffusers and PEFT are pinned to the versions tested together in this application.
 Image generation and fine-tuning can take substantially longer than analysis on CPU.
 
@@ -68,7 +73,8 @@ only on the server's loopback interface.
 4. **Rotation**, **Darkness**, and **Saturation** start checked. Uncheck an action to
    remove it; its values dropdown becomes disabled. Each selected action can use
    all fixed values or one value. Other domains offer their own fixed action choices.
-5. Click **Analyze**. For classification, once the original embeddings finish,
+5. Choose an **Analyze device**: **Automatic** uses CUDA when available, and
+   **CPU** or **CUDA GPU** selects it explicitly. Click **Analyze**. For classification, once the original embeddings finish,
    click a point to dim the other images and compute that image's action combinations.
    Click an action point to inspect the transformed image.
 6. For summarization and generation, the single input and its action variants are
@@ -130,7 +136,7 @@ can limit the selected rows, but may still download the underlying dataset files
 The image selector lists 100 images at a time with previous/next controls.
 
 For classification, **Analyze** downloads the selected model's needed files,
-loads its image processor and weights, and extracts features on CPU. Progress
+loads its image processor and weights, and extracts features on the selected device. Progress
 appears above the viewer. Existing Hugging Face files are reused; gated/private
 models need your normal Hugging Face authentication.
 
@@ -154,18 +160,72 @@ use this format. Only the selected pipeline's CLIP text encoder and tokenizer ar
 loaded/downloaded during Analyze; its UNet and VAE are unnecessary for this prompt view. SDXL,
 FLUX, single-file checkpoints, and custom-code pipelines are not supported by this
 adapter. An incompatible selection reports an error without substituting another
-model. Prompt length is checked against the encoder's token limit.
+model. Discovery accepts standard safetensors or `.bin` component weights,
+preferring safetensors when both exist; `.bin` files use weights-only loading.
+Prompt length is checked against the encoder's token limit.
 
 The running server retains one active model family and its evaluation scorers.
 Repeated discovery runs reuse loaded weights while creating fresh per-run scoring
-settings, seeds, output paths, and measurements. CPU summarization and generation
-reuse the encoder already loaded by Analyze; classification loads its pretrained
+settings, seeds, output paths, and measurements. Summarization and generation
+reuse the encoder already loaded by Analyze when the devices match; classification loads its pretrained
 head on the first discovery and shares the compatible base model afterward.
 Switching model families evicts the previous evaluation resources, and fine-tuning
 clears the inference cache before loading trainable weights. Local checkpoint
 changes invalidate reuse. Keeping the server running avoids repeated weight loads;
 the first download/load and actual inference still take time. Restarting clears
 the memory cache but preserves downloaded Hugging Face files on disk.
+
+### Loading and Analyze performance
+
+Analyze prepares only the model's required configuration, processor/tokenizer,
+and one weight format, preferring safetensors. For indexed checkpoints it downloads
+the named shards. Hugging Face revisions are pinned before loading, and prompt
+analysis continues to download only the diffusion text-conditioning components.
+Four download workers and four Transformers checkpoint-loading workers are enabled
+by default. Parallel checkpoint loading benefits models split into multiple files;
+a single-file model has no shards to load concurrently.
+
+During image generation discovery, UNet and VAE use memory-efficient sequential
+loading by default, which was faster for the tested preset. Set
+`FAILURESHIFT_COMPONENT_WORKERS=2` to load standard unsharded components concurrently.
+That path uses more host RAM to avoid unsafe global initialization state in the
+pinned Diffusers version. Sharded components always retain sequential loading.
+Set `FAILURESHIFT_COMPONENT_WORKERS=1` to explicitly select the default.
+To compare Transformers loading modes, set
+`HF_ENABLE_PARALLEL_LOADING=false`; set `HF_PARALLEL_LOADING_WORKERS` to adjust
+the shard-worker count. Environment overrides must be present when starting the server.
+
+CUDA Analyze uses batches and float32 weights. A batch that exceeds available GPU
+memory is retried in smaller pieces; a single input that cannot fit reports an
+error so you can choose CPU. CPU and CUDA features have separate cache identities.
+Discovery initially selects the same device as Analyze. Moving between devices
+can produce small numerical differences; these changes do not introduce quantization.
+
+Open the **Analyze** timing summary below the graph to see the actual device and
+wall-clock seconds for **Files / download**, **Weight loading**, **Embeddings**,
+and **PCA**. File preparation includes Hub metadata, local cache lookup and any
+downloads; it is not a network-only measurement. Total includes remaining input
+and result preparation; time waiting behind another model job is shown separately.
+Reused stages are marked and take zero new compute time. The timings describe this
+analysis, rather than promising a fixed speedup for every model.
+
+Measured on the RTX 4090 with PyTorch 2.11.0 (CUDA 12.8), using fresh model objects
+and already-downloaded weights (median of three runs per device):
+
+| Analyze workload | CPU embeddings | CUDA embeddings | CPU total | CUDA total |
+| --- | ---: | ---: | ---: | ---: |
+| MobileNetV2, 20 repository images | 0.269 s | 0.132 s | 0.312 s | 0.185 s |
+| DistilBART, one article and 14 edits | 0.411 s | 0.012 s | 0.998 s | 0.737 s |
+
+These measurements exclude first downloads and CUDA context initialization; they
+are not cold-disk benchmarks. Weight loading itself took slightly longer on CUDA
+because weights must move to the GPU. With the downloaded Tiny Stable Diffusion
+preset and a shared text encoder, component/pipeline loading took 0.243 s sequentially
+versus 1.218 s with two workers (one warmup and three alternating runs per mode).
+The concurrent path's initialization overhead outweighed its parallelism, so the
+sequential path remains the default. These component measurements exclude GPU
+transfer and generation.
+Use the per-stage timings to compare your actual model and input workload.
 
 ## Explore the graph
 

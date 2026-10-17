@@ -144,7 +144,7 @@ function modelChoiceChanged() {
   $('model-name').placeholder=huggingface?`e.g. ${modelPresets[task][0].id}`:task==='generation'?'/path/to/stable-diffusion-pipeline':'/path/to/saved-huggingface-model';
   $('model-name').required=custom||!huggingface;
   const help={
-    classification:huggingface?'The selected vision model runs locally on CPU. Model files download on first use.':'Choose a saved Hugging Face model directory with pretrained weights and image processor configuration.',
+    classification:huggingface?'The selected vision model runs locally on the chosen device. Model files download on first use.':'Choose a saved Hugging Face model directory with pretrained weights and image processor configuration.',
     summarization:huggingface?'Uses the selected encoder-decoder model’s summarization encoder. Required model and tokenizer files download on first use.':'Choose a saved encoder-decoder model directory with pretrained weights and tokenizer. Uses its summarization encoder.',
     generation:huggingface?'Stable Diffusion 1/2 pipelines use their CLIP text encoder. Only the required conditioning files download; cached files are reused. SDXL and FLUX are unsupported.':'Choose a Diffusers Stable Diffusion 1/2 pipeline directory with its tokenizer and CLIP text encoder. SDXL and FLUX are unsupported.'
   };
@@ -189,7 +189,7 @@ async function pollPreview(id,request) {
     }
     busy=false;updateControls();
     if(job.status==='error'){error(job.error);$('preview-status').textContent='Could not generate combinations.';return;}
-    await embeddingExplorer.load(job);
+    await embeddingExplorer.load(job,$('analysis-device').value||'auto');
   } catch(e){if(request!==previewRequest)return;busy=false;updateControls();error(e.message);$('preview-status').textContent='Connection interrupted. Click Analyze to try again.';}
 }
 $('preview-form').addEventListener('submit',async event=>{
@@ -210,6 +210,7 @@ $('model-source').addEventListener('change',modelSourceChanged);
 $('model-preset').addEventListener('change',modelChoiceChanged);
 $('model-name').addEventListener('input',modelChoiceChanged);
 $('source-text').addEventListener('input',clearPreview);
+$('analysis-device').addEventListener('change',clearPreview);
 $('reset-actions').addEventListener('click',()=>{delete selections[task];clearPreview();renderActions();});
 document.querySelectorAll('.domain').forEach(button=>button.addEventListener('click',()=>setTask(button.dataset.task)));
 function clearDataset() {

@@ -1,9 +1,14 @@
 """Actual tiny Stable Diffusion, independent CLIP scoring and LoRA optimization."""
 import json
+import gc
+import os
 import shutil
 import tempfile
+import threading
 import unittest
+import weakref
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -73,6 +78,177 @@ class GenerationTests(unittest.TestCase):
         json.dumps(score,allow_nan=False)
         with self.assertRaises(ValueError):
             evaluator.predict('a cat',artifact_name='../escape')
+
+    def test_component_workers_overlap_real_loads_without_global_init_patches(self):
+        barrier=threading.Barrier(2)
+        threads=set()
+        original_register=torch.nn.Module.register_parameter
+        encoder=dm.DiffusionPromptEncoder(self.model())
+        originals={cls:cls.from_pretrained for cls in (UNet2DConditionModel,AutoencoderKL)}
+        def observed(cls):
+            def load(*args,**kwargs):
+                threads.add(threading.get_ident())
+                try:
+                    barrier.wait(timeout=5)
+                except threading.BrokenBarrierError:
+                    self.fail('Independent component loads did not overlap.')
+                self.assertFalse(kwargs.get('low_cpu_mem_usage',True))
+                self.assertIs(torch.nn.Module.register_parameter,original_register)
+                return originals[cls](*args,**kwargs)
+            return load
+        with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':'2'}), \
+                patch.object(UNet2DConditionModel,'from_pretrained',side_effect=observed(UNet2DConditionModel)), \
+                patch.object(AutoencoderKL,'from_pretrained',side_effect=observed(AutoencoderKL)):
+            pipeline,_=dm.load_diffusion(self.model(),encoder=encoder)
+        self.assertEqual(len(threads),2)
+        self.assertNotIn(threading.get_ident(),threads)
+        self.assertIs(torch.nn.Module.register_parameter,original_register)
+        for component in (pipeline.unet,pipeline.vae):
+            self.assertTrue(all(parameter.dtype==torch.float32 and parameter.device.type=='cpu'
+                                for parameter in component.parameters()))
+
+    def test_serial_and_parallel_components_preserve_weights_and_seeded_image(self):
+        loaded=[]
+        for workers in ('1','2'):
+            with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':workers}):
+                pipeline,_=dm.load_diffusion(self.model())
+            pipeline.set_progress_bar_config(disable=True)
+            with torch.inference_mode():
+                image=pipeline('a cat',num_inference_steps=2,height=32,width=32,
+                               generator=torch.Generator(device='cpu').manual_seed(7)).images[0]
+            loaded.append((pipeline,np.asarray(image)))
+        np.testing.assert_array_equal(loaded[0][1],loaded[1][1])
+        for name in ('unet','vae','text_encoder'):
+            original=getattr(loaded[0][0],name).state_dict()
+            parallel=getattr(loaded[1][0],name).state_dict()
+            self.assertEqual(set(original),set(parallel))
+            self.assertTrue(all(torch.equal(original[key],parallel[key]) for key in original))
+
+    def test_bin_components_load_with_weights_only_and_match_safetensors(self):
+        reference,_=dm.load_diffusion(self.model())
+        directory=Path(shutil.copytree(self.pipeline,Path(self.scratch.name)/'bin'))
+        for name in ('unet','vae'):
+            component=directory/name
+            (component/'diffusion_pytorch_model.safetensors').unlink()
+            getattr(reference,name).save_pretrained(component,safe_serialization=False)
+        calls=[]
+        original_load=torch.load
+        def observed(*args,**kwargs):
+            calls.append(kwargs.get('weights_only'))
+            return original_load(*args,**kwargs)
+        for workers in ('1','2'):
+            with self.subTest(workers=workers), patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':workers}), \
+                    patch.object(torch,'load',side_effect=observed):
+                loaded,_=dm.load_diffusion(self.model(directory))
+                for name in ('unet','vae'):
+                    self.assertTrue(all(torch.equal(value,getattr(loaded,name).state_dict()[key])
+                                        for key,value in getattr(reference,name).state_dict().items()))
+                loaded.set_progress_bar_config(disable=True)
+                with torch.inference_mode():
+                    image=loaded('a cat',num_inference_steps=2,height=32,width=32,
+                                 generator=torch.Generator(device='cpu').manual_seed(7)).images[0]
+                self.assertEqual(image.size,(32,32))
+        self.assertTrue(calls)
+        self.assertTrue(all(flag is True for flag in calls))
+
+    def test_sharded_bin_components_use_sequential_memory_efficient_loading(self):
+        directory=Path(shutil.copytree(self.pipeline,Path(self.scratch.name)/'bin-sharded'))
+        original=UNet2DConditionModel.from_pretrained(self.pipeline,subfolder='unet',local_files_only=True)
+        (directory/'unet'/'diffusion_pytorch_model.safetensors').unlink()
+        original.save_pretrained(directory/'unet',safe_serialization=False,max_shard_size='100KB')
+        self.assertTrue((directory/'unet'/'diffusion_pytorch_model.bin.index.json').is_file())
+        observed=[]
+        loader=UNet2DConditionModel.from_pretrained
+        def load_unet(*args,**kwargs):
+            observed.append((threading.get_ident(),kwargs.get('low_cpu_mem_usage'),kwargs.get('use_safetensors')))
+            return loader(*args,**kwargs)
+        with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':'2'}), \
+                patch.object(UNet2DConditionModel,'from_pretrained',side_effect=load_unet):
+            pipeline,_=dm.load_diffusion(self.model(directory))
+        self.assertEqual(observed,[(threading.get_ident(),True,False)])
+        self.assertTrue(all(torch.equal(value,pipeline.unet.state_dict()[key]) for key,value in original.state_dict().items()))
+
+    def test_safetensors_remain_preferred_when_bin_files_also_exist(self):
+        directory=Path(shutil.copytree(self.pipeline,Path(self.scratch.name)/'both-formats'))
+        for name in ('unet','vae'):
+            (directory/name/'diffusion_pytorch_model.bin').write_bytes(b'not a usable checkpoint')
+        loaded,_=dm.load_diffusion(self.model(directory))
+        self.assertTrue(all(torch.isfinite(parameter).all() for parameter in loaded.unet.parameters()))
+
+    def test_offline_component_format_lookup_uses_the_pinned_snapshot(self):
+        revision='a'*40
+        with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':'2'}), \
+                patch('huggingface_hub.list_repo_files',side_effect=ConnectionError('offline')), \
+                patch('huggingface_hub.snapshot_download',return_value=str(self.pipeline)) as cached:
+            workers,formats=dm._component_loading_options({'source':'huggingface','name':'test/pipeline'},revision)
+        cached.assert_called_once_with('test/pipeline',revision=revision,local_files_only=True)
+        self.assertEqual(workers,2)
+        self.assertEqual(formats,{'unet':True,'vae':True})
+
+    def test_default_component_loading_keeps_memory_efficient_initialization(self):
+        observed=[]
+        loader=UNet2DConditionModel.from_pretrained
+        def load_unet(*args,**kwargs):
+            observed.append((threading.get_ident(),kwargs.get('low_cpu_mem_usage')))
+            return loader(*args,**kwargs)
+        with patch.dict(os.environ) as environment, \
+                patch.object(UNet2DConditionModel,'from_pretrained',side_effect=load_unet):
+            environment.pop('FAILURESHIFT_COMPONENT_WORKERS',None)
+            dm.load_diffusion(self.model())
+        self.assertEqual(observed,[(threading.get_ident(),True)])
+
+    def test_component_loading_preserves_rng_for_later_seeded_training(self):
+        encoder=dm.DiffusionPromptEncoder(self.model())
+        for workers in ('1','2'):
+            with self.subTest(workers=workers), patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':workers}):
+                before=torch.random.get_rng_state()
+                dm.load_diffusion(self.model(),encoder=encoder)
+                self.assertTrue(torch.equal(before,torch.random.get_rng_state()))
+
+    def test_component_worker_configuration_rejects_unbounded_or_invalid_counts(self):
+        encoder=dm.DiffusionPromptEncoder(self.model())
+        for workers in ('0','3','-1','all','1.5'):
+            with self.subTest(workers=workers), patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':workers}):
+                with self.assertRaisesRegex(ValueError,'COMPONENT_WORKERS|workers'):
+                    dm.load_diffusion(self.model(),encoder=encoder)
+
+    def test_failed_component_does_not_keep_other_component_alive(self):
+        encoder=dm.DiffusionPromptEncoder(self.model())
+        references=[]
+        vae_loaded=threading.Event()
+        original=AutoencoderKL.from_pretrained
+        def load_vae(*args,**kwargs):
+            model,info=original(*args,**kwargs)
+            references.append(weakref.ref(model))
+            vae_loaded.set()
+            return model,info
+        def broken_unet(*args,**kwargs):
+            self.assertTrue(vae_loaded.wait(timeout=5),'The other component never loaded.')
+            raise ValueError('invalid checkpoint')
+        with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':'2'}), \
+                patch.object(AutoencoderKL,'from_pretrained',side_effect=load_vae), \
+                patch.object(UNet2DConditionModel,'from_pretrained',side_effect=broken_unet):
+            with self.assertRaisesRegex(ValueError,'invalid checkpoint'):
+                dm.load_diffusion(self.model(),encoder=encoder)
+        gc.collect()
+        self.assertEqual(len(references),1)
+        self.assertTrue(all(reference() is None for reference in references))
+
+    def test_sharded_components_preserve_accelerate_loading_and_serialize_initialization(self):
+        directory=Path(shutil.copytree(self.pipeline,Path(self.scratch.name)/'sharded'))
+        original=UNet2DConditionModel.from_pretrained(self.pipeline,subfolder='unet',local_files_only=True)
+        original.save_pretrained(directory/'unet',safe_serialization=True,max_shard_size='100KB')
+        self.assertTrue((directory/'unet'/'diffusion_pytorch_model.safetensors.index.json').is_file())
+        observed=[]
+        loader=UNet2DConditionModel.from_pretrained
+        def load_unet(*args,**kwargs):
+            observed.append((threading.get_ident(),kwargs.get('low_cpu_mem_usage')))
+            return loader(*args,**kwargs)
+        with patch.dict(os.environ,{'FAILURESHIFT_COMPONENT_WORKERS':'2'}), \
+                patch.object(UNet2DConditionModel,'from_pretrained',side_effect=load_unet):
+            pipeline,_=dm.load_diffusion(self.model(directory))
+        self.assertEqual(observed,[(threading.get_ident(),True)])
+        self.assertTrue(all(torch.equal(value,pipeline.unet.state_dict()[key]) for key,value in original.state_dict().items()))
 
     def test_lora_changes_denoiser_saved_pipeline_reloads_and_original_unchanged(self):
         original=load_file(self.pipeline/'unet'/'diffusion_pytorch_model.safetensors')

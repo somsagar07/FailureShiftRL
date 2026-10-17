@@ -23,6 +23,17 @@ const record=(input_index=0,action_id=4)=>({input_index,action_id,visits:1,sever
 const job=(extra={})=>({id:'discovery1',embedding_id:'emb1',task:'classification',status:'running',episode:1,episodes:10,epsilon:.96,loss:.12,reward:.4,mean_reward:.4,unique_evaluations:1,model_calls:2,records:[record()],baseline:[{input_index:0,output:{class_id:2,label:'cat',confidence:.9}}],current:{input_index:0,action_id:4},...extra});
 const tests=[];function test(name,fn){tests.push({name,fn});}
 
+test('discovery defaults to the Analyze device while preserving edits within that analysis',async()=>{
+  const f=setup(),{controller:c,get,explorer,responses,calls}=f;
+  explorer.job={id:'emb1',device:'cuda'};c.ready(explorer.job);
+  responses.push(job({status:'completed'}));await c.start();
+  assert.equal(calls[0].body.device,'cuda','a GPU analysis should not trigger a duplicate CPU model load by default');
+  get('discovery-device').value='cpu';c.ready(explorer.job);
+  assert.equal(get('discovery-device').value,'cpu','re-rendering the same analysis preserves an explicit device choice');
+  explorer.job={id:'emb2',device:'cuda'};c.ready(explorer.job);
+  assert.equal(get('discovery-device').value,'cuda','a new analysis starts with its own device');
+});
+
 test('Analyze gates discovery; labels are explicit and progress/inspection never expand embeddings',async()=>{
   const f=setup(),{controller:c,get,responses,calls}=f;
   assert.equal(get('find-failure').disabled,true);await c.start();assert.equal(calls.length,0);

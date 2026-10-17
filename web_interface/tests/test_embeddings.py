@@ -89,7 +89,7 @@ class EmbeddingTests(unittest.TestCase):
         return job
 
     def overview(self, preview):
-        job = self.manager.start(preview['id'])
+        job = self.manager.start(preview['id'], device='cpu')
         result = self.wait(lambda: self.manager.get(job['id']))
         self.assertEqual(result['status'], 'completed', result.get('error'))
         return result
@@ -190,7 +190,7 @@ class EmbeddingTests(unittest.TestCase):
         path = self.previews.datasets.records[preview['config']['dataset_id']][0]['path']
         Image.new('RGB', (13, 9), 'blue').save(path)
         changed = self.preview(dataset_id=preview['config']['dataset_id'])
-        job = self.manager.start(changed['id'])
+        job = self.manager.start(changed['id'], device='cpu')
         result = self.wait(lambda: self.manager.get(job['id']))
         self.assertEqual(result['status'], 'error')
         self.assertIn('reload', result['error'].lower())
@@ -201,7 +201,7 @@ class EmbeddingTests(unittest.TestCase):
         first = self.overview(first_preview)
         expansion = self.expansion(first, 0)
         count = sum(len(encoder.seen) for encoder in self.encoders)
-        self.assertEqual(self.manager.start(first_preview['id'])['id'], first['id'])
+        self.assertEqual(self.manager.start(first_preview['id'], device='cpu')['id'], first['id'])
         cached = self.expansion(first, 0)
         self.assertEqual(cached['nodes'], expansion['nodes'])
         self.assertEqual(sum(len(encoder.seen) for encoder in self.encoders), count)
@@ -249,7 +249,7 @@ class EmbeddingTests(unittest.TestCase):
                         return bad
                 manager = EmbeddingManager(self.previews, self.root/'invalid', encoder_factory=lambda model: InvalidEncoder())
                 preview = self.preview()
-                result = manager.start(preview['id'])
+                result = manager.start(preview['id'], device='cpu')
                 result = self.wait(lambda: manager.get(result['id']))
                 self.assertEqual(result['status'], 'error')
                 self.assertTrue(result['error'])
@@ -260,7 +260,7 @@ class EmbeddingTests(unittest.TestCase):
             raise ValueError('This checkpoint has no compatible image encoder')
         manager = EmbeddingManager(self.previews, self.root/'broken', encoder_factory=broken)
         preview = self.preview(model='fixture/incompatible')
-        job = manager.start(preview['id'])
+        job = manager.start(preview['id'], device='cpu')
         result = self.wait(lambda: manager.get(job['id']))
         self.assertEqual(result['status'], 'error')
         self.assertEqual(result['model']['name'], 'fixture/incompatible')
@@ -274,10 +274,10 @@ class EmbeddingTests(unittest.TestCase):
         text_preview = self.previews.start(validate_config({'task': 'summarization'}))
         self.wait(lambda: self.previews.get(text_preview['id']))
         with self.assertRaises(ValueError):
-            self.manager.start(text_preview['id'])
+            self.manager.start(text_preview['id'], device='cpu')
         no_model = self.preview(model='')
         with self.assertRaises(ValueError):
-            self.manager.start(no_model['id'])
+            self.manager.start(no_model['id'], device='cpu')
         result = self.overview(self.preview())
         for index in (-1, 2, True, '0'):
             with self.subTest(index=index), self.assertRaises(ValueError):
@@ -326,10 +326,10 @@ class EmbeddingTests(unittest.TestCase):
                 return values
 
         manager = EmbeddingManager(self.previews, self.root/'serial', encoder_factory=SerialEncoder)
-        first = manager.start(self.preview(model='fixture/first')['id'])
+        first = manager.start(self.preview(model='fixture/first')['id'], device='cpu')
         self.addCleanup(release.set)
         self.assertTrue(entered.wait(3))
-        second = manager.start(self.preview(model='fixture/second')['id'])
+        second = manager.start(self.preview(model='fixture/second')['id'], device='cpu')
         self.assertEqual(manager.get(second['id'])['status'], 'queued')
         release.set()
         for job in (first, second):
@@ -349,7 +349,7 @@ class EmbeddingTests(unittest.TestCase):
 
     def test_memory_limit_fails_clearly_without_sampling_the_dataset(self):
         self.manager.MAX_PCA_BYTES = 1
-        job = self.manager.start(self.preview()['id'])
+        job = self.manager.start(self.preview()['id'], device='cpu')
         result = self.wait(lambda: self.manager.get(job['id']))
         self.assertEqual(result['status'], 'error')
         self.assertIn('PCA', result['error'])
@@ -399,7 +399,7 @@ class ModelValidationTests(unittest.TestCase):
 
         class Model:
             config = SimpleNamespace(_commit_hash='fixed-model-revision')
-            def to(self, device):
+            def to(self, device, dtype=None):
                 state['cpu'] = device == 'cpu'
                 return self
             def eval(self):
@@ -422,7 +422,7 @@ class ModelValidationTests(unittest.TestCase):
 
         torch = SimpleNamespace(__version__='2.6.0', set_num_threads=lambda count: None,
                                 inference_mode=inference_mode, is_tensor=lambda value: isinstance(value, TensorFixture),
-                                float64='float64')
+                                float64='float64', float32='float32')
         transformers = SimpleNamespace(AutoModel=SimpleNamespace(from_pretrained=load_model),
                                        AutoImageProcessor=SimpleNamespace(from_pretrained=load_processor))
         cases = [

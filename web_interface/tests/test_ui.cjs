@@ -250,6 +250,14 @@ async function flush(){for(let i=0;i<25;i++)await Promise.resolve();}
   domains.find(button=>button.dataset.task==='classification').events.click();
   assert.equal(get('embedding-wrap').hidden,true);
   assert.equal(get('input-browser').hidden,false,'switching back retains the image dataset');
+  get('model-name').value='/models/vision';get('model-name').events.input();
+  get('analysis-device').value='cuda';get('analysis-device').events.change();
+  await get('preview-form').events.submit({preventDefault(){}});await flush();
+  assert.equal(embeddingRequested.device,'cuda','the form submits the selected Analyze device');
+  get('analysis-device').value='cpu';get('analysis-device').events.change();
+  assert.equal(get('embedding-wrap').hidden,true,'switching devices invalidates the old map');
+  await get('preview-form').events.submit({preventDefault(){}});await flush();
+  assert.equal(embeddingRequested.device,'cpu');
   // The real graph renderer must keep every combination addressable, including the last one.
   let selectedGraphNode;
   let graphSelections=0;

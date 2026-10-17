@@ -19,6 +19,7 @@ from models import ModelManager
 from data_sources import DatasetManager, MAX_UPLOAD_BYTES
 from embeddings import EmbeddingManager, HuggingFaceEncoder, create_encoder
 from discovery import DiscoveryManager
+from model_loading import prepare_analysis_model
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TEXT = ('A university research team tested a new water filter in three villages. '
@@ -164,13 +165,15 @@ class PreviewManager:
                 self.active = None
 
 
-def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune_fn=None):
+def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune_fn=None,
+                  model_preparer=prepare_analysis_model):
     previews = PreviewManager(directory or ROOT/'runs'/'previews')
     models = ModelManager()
     image_encoder, other_encoder = HuggingFaceEncoder, create_encoder
     def encoder_factory(model):
         return image_encoder(model) if model.get('task') == 'classification' else other_encoder(model)
-    embeddings = EmbeddingManager(previews, previews.directory.parent/'embeddings', encoder_factory=encoder_factory)
+    embeddings = EmbeddingManager(previews, previews.directory.parent/'embeddings',
+                                  encoder_factory=encoder_factory, model_preparer=model_preparer)
     discoveries = DiscoveryManager(previews, embeddings, previews.directory.parent/'discoveries',
                                    evaluator_factory=evaluator_factory, finetune_fn=finetune_fn)
 
@@ -278,7 +281,10 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 if self.path == '/api/embeddings':
                     if not isinstance(data, dict) or not isinstance(data.get('preview_id'), str) or not re.fullmatch(r'[0-9a-f]{32}', data['preview_id']):
                         raise ValueError('Generate an image preview before loading its embeddings.')
-                    return self.send(202, embeddings.start(data['preview_id']))
+                    device = data.get('device', 'auto')
+                    if not isinstance(device, str) or device not in ('auto', 'cpu', 'cuda'):
+                        raise ValueError('Choose Automatic, CPU, or CUDA for Analyze.')
+                    return self.send(202, embeddings.start(data['preview_id'], device=device))
                 expansion = re.fullmatch(r'/api/embeddings/([0-9a-f]{32})/expand', self.path)
                 if expansion:
                     if not isinstance(data, dict) or type(data.get('input_index')) is not int:

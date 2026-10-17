@@ -2,22 +2,70 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
+mode=auto
+mode_selected=false
+dry_run=false
+for argument in "$@"; do
+  case "$argument" in
+    --auto|--cpu|--cuda)
+      if [[ "$mode_selected" == true && "$mode" != "${argument#--}" ]]; then
+        printf 'Choose only one of --auto, --cpu, or --cuda.\n' >&2
+        exit 2
+      fi
+      mode="${argument#--}"
+      mode_selected=true
+      ;;
+    --dry-run) dry_run=true ;;
+    --help|-h)
+      printf 'Usage: bash setup.sh [--auto|--cuda|--cpu] [--dry-run]\n\n'
+      printf 'Default: detect NVIDIA hardware and install a compatible CUDA build; otherwise use CPU.\n'
+      printf '  --cuda     Require working CUDA, including a verified GPU tensor operation.\n'
+      printf '  --cpu      Install/retain CPU-only PyTorch, including on NVIDIA machines.\n'
+      printf '  --dry-run  Show the selected build without changing the environment.\n'
+      exit 0
+      ;;
+    *) printf 'Unknown setup option: %s (see --help).\n' "$argument" >&2; exit 2 ;;
+  esac
+done
+
+probe_python=.venv/bin/python
+probe_args=()
+if [[ ! -x "$probe_python" ]]; then
+  probe_python=python3
+  probe_args+=(--fresh)
+fi
+plan="$($probe_python -I check_environment.py --setup-plan "$mode" "${probe_args[@]}")"
+IFS=$'\t' read -r backend action requirement index_url <<< "$plan"
+if [[ "$dry_run" == true ]]; then
+  if [[ "$action" == install ]]; then
+    printf 'Would install %s from %s into %s/.venv\n' "$requirement" "$index_url" "$PWD"
+  fi
+  printf 'Would install app requirements, run pip check, and verify the %s runtime.\n' "$backend"
+  exit 0
+fi
+
 if [[ ! -x .venv/bin/python ]]; then
   python3 -m venv .venv
 fi
-
+backup="$(mktemp "${TMPDIR:-/tmp}/failureshiftrl-pip-before-XXXXXX.txt")"
+.venv/bin/python -I -m pip freeze --all > "$backup"
+printf 'Package versions before setup: %s\n' "$backup"
 printf 'Installing the web interface requirements into %s/.venv\n' "$PWD"
-# Use CPU wheels by default. An existing supported CUDA PyTorch is retained.
-if ! .venv/bin/python -I -c 'import torch; assert (2,6) <= tuple(map(int, torch.__version__.split(".")[:2])) < (3,0)' >/dev/null 2>&1; then
-  if ! .venv/bin/python -I -m pip install --disable-pip-version-check --no-input --retries 1 --timeout 20 --index-url https://download.pytorch.org/whl/cpu 'torch>=2.6,<3'; then
-    printf '\nCould not install CPU PyTorch. Check internet access, then rerun: bash setup.sh\n' >&2
+pip_options=(--disable-pip-version-check --no-input --no-cache-dir --retries 1 --timeout 60)
+if [[ "$action" == install ]]; then
+  if ! .venv/bin/python -I -m pip install "${pip_options[@]}" --index-url "$index_url" "$requirement"; then
+    printf '\nCould not install %s PyTorch. Check the download error and rerun: bash setup.sh --%s\n' "$backend" "$mode" >&2
     exit 1
   fi
 fi
-if ! .venv/bin/python -I -m pip install --disable-pip-version-check --no-input --retries 1 --timeout 20 -r requirements.txt; then
+if ! .venv/bin/python -I -m pip install "${pip_options[@]}" -r requirements.txt; then
   printf '\nSetup could not finish. Check the package-download error above and rerun: bash setup.sh\n' >&2
   exit 1
 fi
 .venv/bin/python -I -m pip check
-.venv/bin/python -I check_environment.py
+check_args=()
+if [[ "$backend" == cuda ]]; then
+  check_args+=(--require-cuda)
+fi
+.venv/bin/python -I check_environment.py "${check_args[@]}"
 printf '\nEnvironment ready. Start the interface with: bash run.sh\n'

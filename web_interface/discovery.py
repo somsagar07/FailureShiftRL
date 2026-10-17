@@ -122,7 +122,7 @@ class DiscoveryManager:
                       reference_summary=data.get('reference_summary', ''), label_map=data.get('label_map', {}))
         if config['generation_size'] % 8:
             raise ValueError('Generation size must be a multiple of eight.')
-        if config['device'] not in ('cpu', 'auto') or config['summary_metric'] not in ('grounded', 'reference'):
+        if config['device'] not in ('cpu', 'auto', 'cuda') or config['summary_metric'] not in ('grounded', 'reference'):
             raise ValueError('Choose a supported device and summary metric.')
         if not isinstance(config['reference_summary'], str) or len(config['reference_summary']) > 50000:
             raise ValueError('Reference summary must be text of at most 50,000 characters.')

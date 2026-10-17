@@ -33,15 +33,18 @@ class EmbeddingExplorer {
     this.control('embedding-back').disabled=true;
     this.control('embedding-meta').textContent='';
     this.control('embedding-focus').textContent='';
+    this.control('analysis-performance').hidden=true;
+    this.control('analysis-performance-summary').textContent='';
+    this.control('analysis-timings').replaceChildren();
   }
 
   get task() {return this.job?.task||this.preview?.config.task||'classification';}
 
-  async load(preview) {
+  async load(preview,device='auto') {
     this.reset();this.preview=preview;const run=this.run;
     this.onError('');this.onBusy(true);this.onStatus('Loading the model and computing embeddings…');
     try {
-      const job=await this.api('/api/embeddings',{preview_id:preview.id});
+      const job=await this.api('/api/embeddings',{preview_id:preview.id,device});
       if(run!==this.run)return;
       await this.receive(job,run);
     } catch(error) {this.fail(error,run);}
@@ -50,7 +53,7 @@ class EmbeddingExplorer {
   async receive(job,run) {
     if(run!==this.run)return;
     if(job.status==='queued'||job.status==='running') {
-      this.onStatus(`${job.phase||'Computing embeddings'}${job.total?` · ${job.completed} / ${job.total}`:''}`);
+      this.onStatus(`${job.phase||'Computing embeddings'}${job.total?` · ${job.completed} / ${job.total}`:''}${job.device?` · ${this.deviceLabel(job)}`:''}`);
       this.timer=setTimeout(async()=>{
         if(run!==this.run)return;
         try{await this.receive(await this.api(`/api/embeddings/${job.id}`),run);}catch(error){this.fail(error,run);}
@@ -66,8 +69,39 @@ class EmbeddingExplorer {
     const population=images?'PCA fit on original images only':fitCount?`PCA fit on the original + ${fitCount-1} action variant${fitCount===2?'':'s'} (${fitCount} total)`:'PCA fit on the original and all action variants';
     this.control('embedding-meta').textContent=`${count} ${images?'image':'input'}${count===1?'':'s'} · ${job.feature_dim}D ${representation} → 3D PCA · ${variance}% variance retained · ${population}`;
     this.control('embedding-meta').title=`${job.model?.name||this.preview.config.model.name} · ${job.feature_method} · ${job.projection.method}. Positions approximate full-space similarity; cosine uses the full embeddings. No failure score is computed.`;
+    this.showPerformance(job);
     this.onStatus('Select an input to explore its action combinations.');this.onBusy(false);this.onReady?.(job);
     if(!images&&job.points.length)await this.focus(job.points[0].index);
+  }
+
+  deviceLabel(job) {
+    if(!job.device)return 'Device not reported';
+    const device=job.device.toUpperCase();
+    return job.device_name&&job.device_name.toUpperCase()!==device?`${device} · ${job.device_name}`:device;
+  }
+
+  showPerformance(job) {
+    const timings=job.timings_seconds;
+    const duration=value=>value===0?'0 s':value<.01?'<0.01 s':`${value.toFixed(2)} s`;
+    this.control('analysis-timings').replaceChildren();
+    this.control('analysis-performance').hidden=!timings;
+    if(!timings)return;
+    const valid=value=>Number.isFinite(value)&&value>=0;
+    const total=valid(timings.total)?` · ${duration(timings.total)}`:'';
+    this.control('analysis-performance-summary').textContent=`Analyze${total} · ${this.deviceLabel(job)}`;
+    const rows=[['Files / download','preparation'],['Weight loading','model_loading'],['Embeddings','embedding'],['PCA','pca']];
+    for(const [label,key] of rows) {
+      if(!valid(timings[key]))continue;
+      const name=document.createElement('dt'),value=document.createElement('dd');
+      name.textContent=label;value.textContent=duration(timings[key]);
+      if(timings[key]===0&&(job.features_reused||(key==='model_loading'&&job.model_reused)))value.textContent+=' · reused';
+      this.control('analysis-timings').append(name,value);
+    }
+    if(valid(job.queue_wait_seconds)&&job.queue_wait_seconds>=.01) {
+      const name=document.createElement('dt'),value=document.createElement('dd');
+      name.textContent='Queue wait';value.textContent=duration(job.queue_wait_seconds);
+      this.control('analysis-timings').append(name,value);
+    }
   }
 
   fail(error,run) {

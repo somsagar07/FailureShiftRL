@@ -171,6 +171,16 @@ class DiscoveryTests(unittest.TestCase):
         evaluator.fail_at = None
         self.assertEqual(self.run_job(manager)['status'], 'completed')
 
+    def test_explicit_cuda_setting_reaches_evaluation(self):
+        devices = []
+        def factory(model, config, directory, progress=None):
+            devices.append(config['device'])
+            return Evaluator()
+        manager = DiscoveryManager(None, self.embeddings, self.directory, evaluator_factory=factory)
+        result = self.run_job(manager, device='cuda')
+        self.assertEqual(result['status'], 'completed', result.get('error'))
+        self.assertEqual(devices, ['cuda'])
+
     def test_rejects_bad_config_before_loading_models(self):
         manager = self.manager()
         for bad in ({'episodes': True}, {'episodes': 0}, {'episodes': 10001}, {'seed': -1},

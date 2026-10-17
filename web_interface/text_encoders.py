@@ -1,4 +1,4 @@
-"""CPU input representations from selected summarization and diffusion models.
+"""Input representations from selected summarization and diffusion models.
 
 These adapters never generate summaries or images. Diffusion loading is limited
 to the pipeline manifest, tokenizer, and CLIP text encoder.
@@ -8,6 +8,8 @@ import math
 import os
 import re
 from pathlib import Path
+
+from model_loading import configure_parallel_loading
 
 
 def _selection(model, task):
@@ -36,6 +38,7 @@ def _selection(model, task):
 
 
 def _dependencies():
+    configure_parallel_loading()
     try:
         import torch
         import transformers
@@ -46,6 +49,26 @@ def _dependencies():
         raise ValueError('Text embeddings require PyTorch 2.6 or newer for safe weights-only loading.')
     torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
     return torch, transformers
+
+
+def _encoder_device(torch, device):
+    if not isinstance(device, str) or device not in ('auto', 'cpu', 'cuda'):
+        raise ValueError('Choose an analysis device: auto, cpu, or cuda.')
+    if device == 'cpu':
+        return 'cpu'
+    available = torch.cuda.is_available()
+    if device == 'cuda' and not available:
+        raise ValueError('CUDA is unavailable. Choose CPU, or install CUDA-enabled PyTorch with a compatible NVIDIA driver.')
+    if available:
+        # Float32 tensors alone do not prevent cuDNN's default TF32 kernels.
+        # Keep the original full-precision feature definition on the GPU too.
+        if hasattr(torch.backends.cuda.matmul, 'fp32_precision'):
+            torch.backends.cuda.matmul.fp32_precision = 'ieee'
+            torch.backends.cudnn.conv.fp32_precision = 'ieee'
+        else:  # PyTorch 2.6–2.8 use the original precision controls.
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+    return 'cuda' if available else 'cpu'
 
 
 def _options(selection, revision=None):
@@ -85,6 +108,12 @@ def _token_limit(tokenizer, *configs, default=2048):
 
 
 class _TextEncoder:
+    def set_device(self, device):
+        device = _encoder_device(self.torch, device)
+        self.model.to(device=device, dtype=self.torch.float32)
+        self.device = device
+        return self
+
     def _prepare(self, texts, prefix=''):
         if not isinstance(texts, list) or not texts or not all(isinstance(text, str) for text in texts):
             raise ValueError('Provide a nonempty list of text inputs.')
@@ -102,7 +131,7 @@ class _TextEncoder:
             if length > self.max_tokens:
                 raise ValueError(f'Text input {index+1} has {length} tokens, exceeding this model\'s supported input limit of '
                                  f'{self.max_tokens} tokens (including the task prefix and special tokens). Shorten the input; truncation is disabled.')
-        return {'input_ids': ids.to('cpu'), 'attention_mask': mask.to('cpu')}
+        return {'input_ids': ids.to(self.device), 'attention_mask': mask.to(self.device)}
 
     def _pool(self, output, mask):
         torch = self.torch
@@ -128,6 +157,7 @@ class SummarizationEncoder(_TextEncoder):
     def __init__(self, model):
         selection = _selection(model, 'summarization')
         self.torch, transformers = _dependencies()
+        self.device = _encoder_device(self.torch, model.get('device', 'cpu'))
         try:
             config = transformers.AutoConfig.from_pretrained(selection['name'], **_options(selection))
             if not config.is_encoder_decoder:
@@ -137,6 +167,7 @@ class SummarizationEncoder(_TextEncoder):
             loaded, info = transformers.AutoModelForSeq2SeqLM.from_pretrained(
                 selection['name'], config=config, weights_only=True, output_loading_info=True, **options)
             self.model = _pretrained(loaded, info, self.torch)
+            self.set_device(self.device)
             self.encoder = self.model.get_encoder()
             self.tokenizer = transformers.AutoTokenizer.from_pretrained(selection['name'], **options)
             self._configure_tokenizer()
@@ -171,6 +202,7 @@ class DiffusionPromptEncoder(_TextEncoder):
     def __init__(self, model):
         selection = _selection(model, 'generation')
         self.torch, transformers = _dependencies()
+        self.device = _encoder_device(self.torch, model.get('device', 'cpu'))
         try:
             if selection['source'] == 'local':
                 index_path = Path(selection['name'])/'model_index.json'
@@ -201,6 +233,7 @@ class DiffusionPromptEncoder(_TextEncoder):
                 selection['name'], subfolder='text_encoder', config=config,
                 weights_only=True, output_loading_info=True, **options)
             self.model = _pretrained(loaded, info, self.torch)
+            self.set_device(self.device)
             self.tokenizer = tokenizers[tokenizer[1]].from_pretrained(selection['name'], subfolder='tokenizer', **options)
             if tokenizer[1] == 'CLIPTokenizer' and not callable(getattr(self.tokenizer, 'fix_text', None)):
                 raise ValueError('CLIP tokenization requires ftfy for consistent text normalization. Run bash setup.sh from web_interface.')

@@ -24,6 +24,7 @@ class DiscoveryController {
   get analysisReady() {return Boolean(this.context&&this.context===this.explorer.job?.id);}
   get attached() {return Boolean(this.analysisReady&&this.job?.embedding_id===this.context);}
   ready(job) {
+    if(this.context!==job.id&&['cpu','cuda'].includes(job.device))this.el('discovery-device').value=job.device;
     this.context=job.id;this.configure();
     if(!this.attached){this.hideResults();this.examples=[];this.selected=null;this.el('finetune-examples').replaceChildren();}
     this.controls();

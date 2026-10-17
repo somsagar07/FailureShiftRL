@@ -3,10 +3,13 @@ import gc
 import copy
 import json
 import math
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from text_encoders import (_dependencies, _options, _pretrained, _resolved_revision,
+from model_loading import configure_parallel_loading
+from text_encoders import (_dependencies, _encoder_device, _options, _pretrained, _resolved_revision,
                            _selection, _token_limit, SummarizationEncoder, DiffusionPromptEncoder)
 
 
@@ -29,14 +32,22 @@ def resolve_label(config,target):
 
 
 def _device(torch,config):
-    value=config.get('device','cpu')
-    if value not in ('cpu','auto'):
-        raise ValueError('Device must be cpu or auto.')
-    return 'cuda' if value=='auto' and torch.cuda.is_available() else 'cpu'
+    return _encoder_device(torch,config.get('device','cpu'))
+
+
+def _evaluation_encoder(cls,model,device,encoder,shared):
+    selected=shared.encoder if shared is not None else encoder
+    if selected is not None and selected.device==device:
+        return selected
+    if shared is not None:
+        raise ValueError('Shared evaluation resources must use the requested device.')
+    # Keep an Analyze encoder on its own device if evaluation requests another.
+    return cls({**model,'device':device})
 
 
 class Evaluator:
     def __init__(self,config,directory):
+        configure_parallel_loading()
         self.config=dict(config)
         self.directory=Path(directory).resolve()
         self.directory.mkdir(parents=True,exist_ok=True)
@@ -67,6 +78,8 @@ class ClassificationEvaluator(Evaluator):
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
         if shared is not None:
+            if shared.device!=self.device:
+                raise ValueError('Shared evaluation resources must use the requested device.')
             self.model,self.processor,self.revision=shared.model,shared.processor,shared.revision
             return
         try:
@@ -158,6 +171,7 @@ def nonrepetition(text):
 
 class GroundedScorer:
     def __init__(self,model,device):
+        configure_parallel_loading()
         self.torch,transformers=_dependencies()
         selection=_selection(model,'summarization')
         cfg=transformers.AutoConfig.from_pretrained(selection['name'],**_options(selection))
@@ -217,11 +231,11 @@ class SummarizationEvaluator(Evaluator):
             raise ValueError('Summary evaluation requires an explicit reference summary.')
         if self.metric=='grounded' and (not isinstance(self.source,str) or not self.source.strip()):
             raise ValueError('Grounded summary scoring needs original source text.')
-        self.encoder=shared.encoder if shared is not None else encoder or SummarizationEncoder(model)
+        self.torch,_=_dependencies()
+        self.device=_device(self.torch,config)
+        self.encoder=_evaluation_encoder(SummarizationEncoder,model,self.device,encoder,shared)
         self.model,self.tokenizer,self.torch=self.encoder.model,self.encoder.tokenizer,self.encoder.torch
         self.revision=self.encoder.revision
-        self.device=_device(self.torch,config)
-        self.model.to(self.device)
         self.max_new_tokens=config.get('max_new_tokens',96)
         if isinstance(self.max_new_tokens,bool) or not isinstance(self.max_new_tokens,int) or not 1<=self.max_new_tokens<=512:
             raise ValueError('max_new_tokens must be an integer from 1 to 512.')
@@ -272,7 +286,47 @@ class SummarizationEvaluator(Evaluator):
         return result
 
 
+def _component_loading_options(selection,revision):
+    # Memory-efficient initialization was faster for the tested SD preset.
+    # Keep independent component workers available for workload-specific checks.
+    value=os.environ.get('FAILURESHIFT_COMPONENT_WORKERS','1')
+    if value not in ('1','2'):
+        raise ValueError('FAILURESHIFT_COMPONENT_WORKERS must be 1 or 2.')
+    def local_files(directory):
+        return {f'{name}/diffusion_pytorch_model.{suffix}'
+                for name in ('unet','vae')
+                for suffix in ('safetensors','safetensors.index.json','bin','bin.index.json')
+                if (Path(directory)/name/f'diffusion_pytorch_model.{suffix}').is_file()}
+    if selection['source']=='local':
+        files=local_files(selection['name'])
+    else:
+        from huggingface_hub import list_repo_files,snapshot_download
+        try:
+            files=set(list_repo_files(selection['name'],revision=revision))
+        except Exception as remote_error:
+            try:
+                directory=snapshot_download(selection['name'],revision=revision,local_files_only=True)
+            except Exception:
+                raise remote_error
+            files=local_files(directory)
+    formats={}
+    sharded=False
+    for name in ('unet','vae'):
+        for suffix in ('safetensors','bin'):
+            weight=f'{name}/diffusion_pytorch_model.{suffix}'
+            if weight in files or weight+'.index.json' in files:
+                formats[name]=suffix=='safetensors'
+                sharded=sharded or weight+'.index.json' in files
+                break
+        else:
+            raise ValueError(f'The {name} component needs standard safetensors or .bin pretrained weights.')
+    # Diffusers 0.30.3 requires its Accelerate path for sharded components.
+    # That path patches global parameter registration, so serialize it.
+    return (1 if sharded else int(value)),formats
+
+
 def load_diffusion(model,*,encoder=None):
+    configure_parallel_loading()
     try:
         import diffusers
     except ImportError as exc:
@@ -304,14 +358,39 @@ def load_diffusion(model,*,encoder=None):
             raise ValueError(f'Unsupported pipeline component: {key}.')
     if index.get('image_encoder') not in (None,[None,None]):
         raise ValueError('Pipelines with extra image encoder components are unsupported.')
+    workers,component_formats=_component_loading_options(selection,encoder.revision)
+    def load_component(name,cls):
+        # Accelerate's default empty-weight initialization mutates global torch
+        # methods. The regular load path avoids that race for bounded workers,
+        # at the cost of holding initialized weights plus the state dictionary.
+        loaded,info=cls.from_pretrained(selection['name'],subfolder=name,use_safetensors=component_formats[name],
+            low_cpu_mem_usage=workers==1,output_loading_info=True,**options)
+        return _pretrained(loaded,info,encoder.torch)
+
     components={}
-    for name,cls in [('unet',diffusers.UNet2DConditionModel),('vae',diffusers.AutoencoderKL)]:
-        loaded,info=cls.from_pretrained(selection['name'],subfolder=name,use_safetensors=True,
-                                        output_loading_info=True,**options)
-        components[name]=_pretrained(loaded,info,encoder.torch)
-    pipeline=diffusers.StableDiffusionPipeline.from_pretrained(
-        selection['name'],text_encoder=encoder.model,tokenizer=encoder.tokenizer,
-        use_safetensors=True,**components,**options)
+    futures=[]
+    classes=[('unet',diffusers.UNet2DConditionModel),('vae',diffusers.AutoencoderKL)]
+    try:
+        # Temporary initialization must not alter the RNG used by later LoRA
+        # training. Join all workers before restoring this caller's CPU state.
+        with encoder.torch.random.fork_rng(devices=[]):
+            if workers==1:
+                for name,cls in classes:
+                    components[name]=load_component(name,cls)
+            else:
+                with ThreadPoolExecutor(max_workers=2,thread_name_prefix='diffusion-loader') as executor:
+                    futures=[(name,executor.submit(load_component,name,cls)) for name,cls in classes]
+                    for name,future in futures:
+                        components[name]=future.result()
+        pipeline=diffusers.StableDiffusionPipeline.from_pretrained(
+            selection['name'],text_encoder=encoder.model,tokenizer=encoder.tokenizer,
+            use_safetensors=None,**components,**options)
+    finally:
+        # A worker may finish after its sibling fails. Drop both completed
+        # results once the executor has joined, including exception paths.
+        components.clear()
+        futures.clear()
+        future=None
     return pipeline,encoder.revision
 
 
@@ -323,7 +402,7 @@ class GenerationEvaluator(Evaluator):
         super().__init__(config,directory)
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
-        self.encoder=shared.encoder if shared is not None else encoder or DiffusionPromptEncoder(model)
+        self.encoder=_evaluation_encoder(DiffusionPromptEncoder,model,self.device,encoder,shared)
         if shared is not None:
             self.pipeline,self.revision=shared.pipeline,shared.revision
         else:

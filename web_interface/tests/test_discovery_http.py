@@ -97,7 +97,8 @@ class DiscoveryHTTPTests(unittest.TestCase):
 
         with patch('server.ThreadingHTTPServer', MemoryServer), patch('server.HuggingFaceEncoder', Encoder):
             self.server = create_server(8000, Path(self.tmp.name) / 'isolated' / 'previews',
-                                        evaluator_factory=Evaluator, finetune_fn=train)
+                                        evaluator_factory=Evaluator, finetune_fn=train,
+                                        model_preparer=lambda model: (model, {}))
         images = Path(self.tmp.name) / 'images'
         images.mkdir()
         Image.new('RGB', (8, 8), 'red').save(images / 'red.png')

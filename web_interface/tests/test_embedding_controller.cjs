@@ -20,7 +20,7 @@ class View {
 let inspected,status,busy,error,selectedIndex,resolveExpansion,resolveEmbedding;
 const points=[0,1].map(index=>({index,name:`image-${index}.png`,image:`/input-${index}/original.png`,position:[index,0,0]}));
 const action=index=>({id:0,action:{rotation:5,darkness:.2,saturation:.5},image:`/input-${index}/action-0.png`,position:[index,.1,0],similarity:.95});
-const job={id:'embedding',status:'completed',points,feature_dim:4,feature_method:'pooled features',model:{name:'test/model'},projection:{method:'PCA',variance:.85,rank:3}};
+const job={id:'embedding',status:'completed',points,feature_dim:4,feature_method:'pooled features',model:{name:'test/model'},projection:{method:'PCA',variance:.85,rank:3},device:'cuda',device_name:'NVIDIA GeForce RTX 4090',timings_seconds:{preparation:.12,model_loading:.25,embedding:.08,pca:.01,total:.47}};
 const expansion=index=>({id:`expand-${index}`,status:'completed',input_index:index,original:points[index],nodes:[action(index)]});
 const calls=[];
 let deferNextEmbedding=false;
@@ -40,9 +40,16 @@ context.options={api,onInspect:(...args)=>{inspected=args;},onStatus:value=>{sta
 vm.runInContext('const explorer=new EmbeddingExplorer(options);',context);
 const explorer=vm.runInContext('explorer',context);
 const preview={id:'preview',config:{task:'classification',model:{name:'test/model'},action_space:{rotation:[5],darkness:[.2],saturation:[.5]}}};
+const content=element=>[element.textContent,...element.children.map(content)].join(' ');
 (async()=>{
-  await explorer.load(preview);
+  await explorer.load(preview,'cuda');
   assert.equal(calls[0].body.preview_id,'preview','the map uses the current preview, model and dataset');
+  assert.equal(calls[0].body.device,'cuda','Analyze passes the chosen device to the backend');
+  assert.equal(get('analysis-performance').hidden,false);
+  assert.match(get('analysis-performance-summary').textContent,/CUDA.*RTX 4090/);
+  assert.match(content(get('analysis-timings')),/Weight loading.*0\.25/);
+  assert.match(content(get('analysis-timings')),/Embeddings.*0\.08/);
+  assert.match(content(get('analysis-timings')),/PCA.*0\.01/);
   assert.equal(explorer.view.points.length,2,'all original images appear before expanding any');
   assert.equal(explorer.view.index,null);
   assert.equal(get('embedding-wrap').hidden,false);
@@ -80,6 +87,8 @@ const preview={id:'preview',config:{task:'classification',model:{name:'test/mode
   deferNextEmbedding=true;const pending=explorer.load(preview);
   explorer.reset();resolveEmbedding(job);await pending;
   assert.equal(get('embedding-wrap').hidden,true,'a stale load cannot reopen a cleared map');
+  assert.equal(get('analysis-performance').hidden,true,'reset hides timings from the old analysis');
+  assert.equal(content(get('analysis-timings')).trim(),'','reset clears stale timing values');
   assert.equal(explorer.view.points.length,0);
   deferNextEmbedding=false;
   context.options.api=async()=>({status:'error',error:'This model cannot produce image embeddings.'});
@@ -88,6 +97,14 @@ const preview={id:'preview',config:{task:'classification',model:{name:'test/mode
   assert.ok(error.includes('cannot produce image embeddings'));
   assert.equal(explorer.view.points.length,0,'model failure never produces fake coordinates');
   assert.equal(busy,false);
+  explorer.api=originalApi;
+  const cached={...job,device:'cpu',device_name:'CPU',model_reused:true,features_reused:true,timings_seconds:{preparation:0,model_loading:0,embedding:0,pca:0,total:.005}};
+  explorer.api=async()=>cached;
+  await explorer.load(preview);
+  assert.equal(get('analysis-performance').hidden,false,'zero-duration cached stages still have timing information');
+  assert.match(get('analysis-performance-summary').textContent,/CPU/);
+  assert.match(content(get('analysis-timings')),/reused/i);
+  assert.ok(!get('analysis-performance-summary').textContent.includes('4090'),'device changes cannot retain the old GPU label');
   explorer.api=originalApi;
   for(const [task,text,actionText,action,method] of [
     ['summarization','HELLO World!','hello world!',{name:'to_lowercase'},'summarization encoder'],
@@ -106,6 +123,8 @@ const preview={id:'preview',config:{task:'classification',model:{name:'test/mode
     };
     selectedIndex='unchanged';
     await explorer.load(textPreview);
+    assert.equal(textCalls[0].body.device,'auto','Analyze defaults to automatic device selection');
+    assert.equal(get('analysis-performance').hidden,true,'older reports without timings do not reuse a previous timing panel');
     assert.equal(explorer.view.index,0,`${task} automatically focuses the only input`);
     assert.equal(inspected[0].text,text,'the filled baseline or original text is immediately previewed');
     assert.equal(selectedIndex,'unchanged','text input focus must not invoke the image dataset browser');
@@ -126,4 +145,5 @@ const preview={id:'preview',config:{task:'classification',model:{name:'test/mode
   }
   console.log('PASS: dataset overview, focus/expansion, action inspector, collapse, stale responses and model errors');
   console.log('PASS: text domains focus their input, label encoder and PCA population, and preserve text/cosine selection');
+  console.log('PASS: selected Analyze device, actual device/timings, cached stages and stale result clearing');
 })().catch(err=>{console.error(err);process.exitCode=1;});

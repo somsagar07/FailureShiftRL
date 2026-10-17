@@ -13,7 +13,7 @@ import transformers
 from PIL import Image
 from safetensors.torch import load_file, save_file
 
-from embeddings import EmbeddingManager, _model_key
+from embeddings import EmbeddingManager, HuggingFaceEncoder, _model_key
 import test_discovery_models as evaluator_fixtures
 import test_generation_models as generation_fixtures
 
@@ -29,7 +29,7 @@ class ModelReuseTests(unittest.TestCase):
 
     def evaluation(self, task='classification', model=None, **config):
         evaluator = self.manager.evaluation_model(
-            model or self.model(task), {'task': task, **config}, Path(self.scratch.name)/'run')
+            model or self.model(task), {'task': task, 'device': 'cpu', **config}, Path(self.scratch.name)/'run')
         self.addCleanup(evaluator.close)
         return evaluator
 
@@ -66,6 +66,66 @@ class ModelReuseTests(unittest.TestCase):
             second = self.evaluation(failure_threshold=.4)
             self.assertEqual(second.predict(image), probabilities)
             self.assertEqual(second.threshold, .4)
+        np.testing.assert_array_equal(before, encoder.encode([image]))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware is unavailable')
+    def test_cuda_image_encoder_uses_fp32_cuda_inputs_and_returns_equivalent_cpu_features(self):
+        selection = self.model()
+        cpu = HuggingFaceEncoder({**selection, 'device': 'cpu'})
+        gpu = HuggingFaceEncoder({**selection, 'device': 'cuda'})
+        observed = []
+
+        def observe(module, args, kwargs):
+            observed.append((next(module.parameters()).device.type, next(module.parameters()).dtype,
+                             kwargs['pixel_values'].device.type, torch.is_inference_mode_enabled()))
+
+        hook = gpu.model.register_forward_pre_hook(observe, with_kwargs=True)
+        images = [Image.new('RGB', (20, 20), color) for color in ('red', 'lime', 'blue')]
+        try:
+            expected = cpu.encode(images)
+            actual = gpu.encode(images)
+        finally:
+            hook.remove()
+        self.assertEqual(gpu.device, 'cuda')
+        self.assertEqual(observed, [('cuda', torch.float32, 'cuda', True)])
+        self.assertEqual(actual.dtype, np.float64)
+        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+        gpu.set_device('cpu')
+        self.assertEqual(gpu.device, 'cpu')
+        np.testing.assert_allclose(gpu.encode(images), expected, rtol=2e-6, atol=2e-6)
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware is unavailable')
+    def test_cuda_summary_retains_analysis_weights_and_cpu_evaluation_does_not_move_them(self):
+        selection = {**self.model('summarization'), 'device': 'cuda'}
+        encoder = self.manager._load_encoder(selection, _model_key(selection))
+        before = encoder.encode(['a cat'])
+        with patch('transformers.AutoModelForSeq2SeqLM.from_pretrained',
+                   side_effect=AssertionError('CUDA Analyze weights were loaded again')):
+            evaluator = self.evaluation('summarization', device='cuda', reference_summary='a cat', max_new_tokens=2)
+            self.assertIs(evaluator.model, encoder.model)
+            self.assertIs(self.manager._load_encoder(selection, _model_key(selection)), encoder)
+            evaluator.predict('a cat')
+        cpu = self.evaluation('summarization', device='cpu', reference_summary='a cat', max_new_tokens=2)
+        self.assertIsNot(cpu.model, encoder.model)
+        self.assertEqual(next(cpu.model.parameters()).device.type, 'cpu')
+        self.assertEqual(encoder.device, 'cuda')
+        self.assertEqual(next(encoder.model.parameters()).device.type, 'cuda')
+        np.testing.assert_array_equal(before, encoder.encode(['a cat']))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware is unavailable')
+    def test_cuda_classifier_shares_analysis_base_and_reuses_classifier_weights(self):
+        selection = {**self.model(), 'device': 'cuda'}
+        encoder = self.manager._load_encoder(selection, _model_key(selection))
+        image = Image.new('RGB', (20, 20), 'red')
+        before = encoder.encode([image])
+        first = self.evaluation(device='cuda')
+        self.assertIs(encoder.model, first.model.base_model)
+        prediction = first.predict(image)
+        with patch('transformers.AutoModelForImageClassification.from_pretrained',
+                   side_effect=AssertionError('CUDA classifier was loaded again')):
+            second = self.evaluation(device='cuda', failure_threshold=.4)
+            self.assertEqual(second.predict(image), prediction)
+        self.assertEqual(encoder.device, 'cuda')
         np.testing.assert_array_equal(before, encoder.encode([image]))
 
     def test_changed_checkpoint_replaces_cached_weights_and_release_drops_the_model(self):

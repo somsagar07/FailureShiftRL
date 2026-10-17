@@ -124,6 +124,50 @@ class TextEncoderTests(unittest.TestCase):
         self.assertIn('last_hidden_state', encoder.feature_method)
         self.assertIsNone(encoder.revision)
 
+    def test_direct_adapters_default_to_cpu_and_expose_device_switching(self):
+        for path, task, adapter in [(self.summary, 'summarization', text_encoders.SummarizationEncoder),
+                                    (self.pipeline, 'generation', text_encoders.DiffusionPromptEncoder)]:
+            with self.subTest(task=task):
+                encoder = adapter(self.selection(path, task))
+                before = encoder.encode(['a cat'])
+                self.assertEqual(encoder.device, 'cpu')
+                encoder.set_device('cpu')
+                np.testing.assert_array_equal(before, encoder.encode(['a cat']))
+                with self.assertRaisesRegex(ValueError, 'device|cpu|cuda'):
+                    encoder.set_device('invalid')
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA hardware is unavailable')
+    def test_cuda_text_adapters_keep_weights_and_inputs_together_and_preserve_features(self):
+        for path, task, adapter in [(self.summary, 'summarization', text_encoders.SummarizationEncoder),
+                                    (self.pipeline, 'generation', text_encoders.DiffusionPromptEncoder)]:
+            with self.subTest(task=task):
+                selection = self.selection(path, task)
+                cpu = adapter({**selection, 'device': 'cpu'})
+                gpu = adapter({**selection, 'device': 'cuda'})
+                observed = []
+
+                def observe(module, args, kwargs):
+                    observed.append((next(module.parameters()).device.type,
+                                     next(module.parameters()).dtype,
+                                     {value.device.type for value in kwargs.values() if torch.is_tensor(value)},
+                                     torch.is_inference_mode_enabled()))
+
+                network = gpu.encoder if task == 'summarization' else gpu.model
+                hook = network.register_forward_pre_hook(observe, with_kwargs=True)
+                try:
+                    texts = ['a cat', 'a cat in the garden runs quietly']
+                    expected = cpu.encode(texts)
+                    actual = gpu.encode(texts)
+                finally:
+                    hook.remove()
+                self.assertEqual(gpu.device, 'cuda')
+                self.assertEqual(observed, [('cuda', torch.float32, {'cuda'}, True)])
+                self.assertEqual(actual.dtype, np.float64)
+                np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+                gpu.set_device('cpu')
+                self.assertEqual(gpu.device, 'cpu')
+                np.testing.assert_allclose(gpu.encode(texts), expected, rtol=2e-6, atol=2e-6)
+
     def test_summarization_is_padding_invariant_and_runs_encoder_only_in_inference_mode(self):
         encoder = text_encoders.SummarizationEncoder(self.selection())
         observations = []

@@ -37,8 +37,10 @@
             <label for="model-name" id="model-label">Local model directory</label>
             <input id="model-name" type="text" placeholder="/path/to/saved-huggingface-model" autocomplete="off">
           </div>
-          <p id="model-help" class="hint">The selected vision model runs locally on CPU.</p>
+          <p id="model-help" class="hint">The selected vision model runs locally on the chosen device.</p>
           <p id="model-status" class="hint" aria-live="polite"></p>
+          <label for="analysis-device">Analyze device</label>
+          <select id="analysis-device"><option value="auto">Automatic (CUDA when available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
 
           <h2>Input</h2>
           <div id="image-fields">
@@ -115,6 +117,7 @@
               <select id="embedding-action"></select>
             </div>
             <p id="embedding-meta" class="hint"></p>
+            <details id="analysis-performance" hidden><summary id="analysis-performance-summary"></summary><dl id="analysis-timings" class="metric-rows"></dl><p class="hint">Files / download includes model file lookup and any downloads. Total includes input preparation and other analysis work. Queue wait is separate.</p></details>
             <div class="discovery-launch"><button id="find-failure" type="button" disabled>Find failure</button></div>
             <p id="severity-legend" class="hint" hidden><span class="severity-gradient"></span> Low severity → high severity · gray: unevaluated · outlined pulse: current input/action. Original color averages observed pairs only.<br>Action size ranks variation of DQN action preference across original inputs: larger means less variation. <span class="unknown-std-key" aria-hidden="true"></span> Purple dashed boundary: standard deviation unavailable (neutral size). Dark outer ring: selected action. Originals keep their role sizes. Compare mean preference and tested-input coverage in the inspector; variation is not calibrated failure confidence.</p>
             <p class="hint embedding-help">Drag to rotate · Shift-drag to pan · scroll to zoom · click a point to explore</p>
@@ -127,7 +130,7 @@
             <div id="discovery-labels"><label for="discovery-label-map">Labels (optional JSON)</label><textarea id="discovery-label-map" rows="2" placeholder='{"0": "cat", "1": 281}'></textarea><p class="hint">Input indices start at 0. Use exact model label names or class IDs; dataset labels are not mapped automatically. Without labels, findings are prediction-change candidates.</p></div>
             <div id="discovery-summary" hidden><label for="discovery-reference">Human reference summary (required)</label><textarea id="discovery-reference" rows="3"></textarea><label for="discovery-metric">Summary review metric</label><select id="discovery-metric"><option value="grounded">Source grounding (NLI) + reference ROUGE-L</option><option value="reference">Fast reference overlap (ROUGE-L)</option></select></div>
             <p id="discovery-generation" class="hint" hidden>Generates real images and scores prompt/image CLIP alignment with matched noise seeds. This is a review signal, not a demographic bias measurement.</p>
-            <details><summary>Evaluation options</summary><label id="discovery-threshold-field">Quality-drop threshold <input id="discovery-threshold" type="number" min="0" max="1" step="0.01" value="0.15"></label><div id="generation-options" hidden><label>Diffusion steps <input id="discovery-steps" type="number" min="1" max="100" value="12"></label><label>Image size <select id="discovery-size"><option value="256">256</option><option value="512">512</option></select></label></div><label>Device <select id="discovery-device"><option value="cpu">CPU</option><option value="auto">Automatic</option></select></label></details>
+            <details><summary>Evaluation options</summary><label id="discovery-threshold-field">Quality-drop threshold <input id="discovery-threshold" type="number" min="0" max="1" step="0.01" value="0.15"></label><div id="generation-options" hidden><label>Diffusion steps <input id="discovery-steps" type="number" min="1" max="100" value="12"></label><label>Image size <select id="discovery-size"><option value="256">256</option><option value="512">512</option></select></label></div><label>Device <select id="discovery-device"><option value="auto">Automatic</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></label></details>
           </fieldset>
           <div class="job-buttons"><button id="discovery-start" type="button">Start discovery</button><button id="discovery-cancel" type="button" hidden>Cancel discovery</button><button id="finetune-cancel" type="button" hidden>Cancel training</button><button id="discovery-retry" type="button" hidden>Retry status</button></div>
           <p id="discovery-status" role="status"></p><p id="discovery-error" class="error" role="alert" hidden></p><p id="discovery-metrics" class="hint"></p><p id="discovery-criterion" class="hint"></p>

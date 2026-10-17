@@ -32,7 +32,7 @@ class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         with patch('server.ThreadingHTTPServer', MemoryServer):
-            self.server = create_server(8000, self.tmp.name)
+            self.server = create_server(8000, self.tmp.name, model_preparer=lambda model: (model, {}))
     def tearDown(self):
         self.tmp.cleanup()
     def request(self, path='/', method='GET', host='127.0.0.1:8000', origin=None, body=None):
@@ -65,7 +65,10 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('action space', json.loads(body)['error'])
 
     def test_invalid_embedding_requests_are_client_errors(self):
-        for body in [None, [], {}, {'preview_id':'bad'}]:
+        for body in [None, [], {}, {'preview_id':'bad'},
+                     {'preview_id': '0'*32, 'device': 'gpu'},
+                     {'preview_id': '0'*32, 'device': None},
+                     {'preview_id': '0'*32, 'device': ['cpu']}]:
             with self.subTest(body=body):
                 code, payload = self.request('/api/embeddings', 'POST', body=body)
                 self.assertEqual(code, 400)
@@ -83,7 +86,7 @@ class HTTPTests(unittest.TestCase):
                 return np.array([list(np.asarray(image).mean(axis=(0,1)))+[1.] for image in images])
 
         with patch('server.HuggingFaceEncoder', Encoder), patch('server.ThreadingHTTPServer', MemoryServer):
-            self.server = create_server(8000, self.tmp.name)
+            self.server = create_server(8000, self.tmp.name, model_preparer=lambda model: (model, {}))
         root = Path(self.tmp.name)/'embedding-input'
         root.mkdir()
         for index, color in enumerate(['red','green','blue','yellow']):
@@ -107,10 +110,13 @@ class HTTPTests(unittest.TestCase):
         code,body=self.request('/api/previews','POST',body=config)
         self.assertEqual(code,202)
         preview=json.loads(body);preview=wait('/api/previews/'+preview['id'],preview)
-        code,body=self.request('/api/embeddings','POST',body={'preview_id':preview['id']})
+        code,body=self.request('/api/embeddings','POST',body={'preview_id':preview['id'],'device':'cpu'})
         self.assertEqual(code,202)
         job=json.loads(body);path='/api/embeddings/'+job['id'];job=wait(path,job)
         self.assertEqual(job['status'],'completed')
+        self.assertEqual(job['device'], 'cpu')
+        self.assertEqual(job['requested_device'], 'cpu')
+        self.assertTrue(all(value >= 0 for value in job['timings_seconds'].values()))
         self.assertEqual(len(job['points']),4)
         self.assertEqual([p['index'] for p in job['points']],[0,1,2,3])
         self.assertEqual(len(job['points'][0]['position']),3)
@@ -173,7 +179,7 @@ class HTTPTests(unittest.TestCase):
                 return np.array([[1., len(text), sum(c.isupper() for c in text)] for text in texts])
 
         with patch('server.create_encoder', Encoder), patch('server.ThreadingHTTPServer', MemoryServer):
-            self.server = create_server(8000, self.tmp.name)
+            self.server = create_server(8000, self.tmp.name, model_preparer=lambda model: (model, {}))
 
         def finish(path, job):
             deadline = time.monotonic()+5

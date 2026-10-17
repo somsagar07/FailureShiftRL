@@ -59,7 +59,7 @@ class DomainEmbeddingTests(unittest.TestCase):
         return self.wait(lambda: self.previews.get(job['id']))
 
     def analyze(self, preview):
-        job = self.manager.start(preview['id'])
+        job = self.manager.start(preview['id'], device='cpu')
         return self.wait(lambda: self.manager.get(job['id']))
 
     def expand(self, job):
@@ -89,7 +89,7 @@ class DomainEmbeddingTests(unittest.TestCase):
             self.assertAlmostEqual(1-distance**2/2, node['similarity'])
         self.assertEqual(len(self.encoders[0].seen), 3, 'Expansion must reuse the analyzed variants')
         self.assertEqual(self.expand(job)['nodes'], expansion['nodes'])
-        self.assertEqual(self.manager.start(preview['id'])['id'], job['id'])
+        self.assertEqual(self.manager.start(preview['id'], device='cpu')['id'], job['id'])
 
     def test_generation_uses_a_concrete_stable_baseline_and_all_prompt_variants(self):
         preview = self.preview('generation')
@@ -145,7 +145,7 @@ class DomainEmbeddingTests(unittest.TestCase):
         preview = self.preview()
         original_factory = self.manager.encoder_factory
         self.manager.encoder_factory = lambda model: (_ for _ in ()).throw(ValueError('temporary loading problem'))
-        failed = self.manager.start(preview['id'])
+        failed = self.manager.start(preview['id'], device='cpu')
         deadline = time.monotonic() + 5
         while self.manager.get(failed['id'])['status'] != 'error' and time.monotonic() < deadline:
             time.sleep(.005)
