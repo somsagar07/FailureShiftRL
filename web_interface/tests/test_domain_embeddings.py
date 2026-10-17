@@ -111,6 +111,13 @@ class DomainEmbeddingTests(unittest.TestCase):
         self.assertEqual(chosen_job['projection']['fit_count'], 2)
         self.assertEqual(len(self.expand(chosen_job)['nodes']), 1)
 
+    def test_discovery_text_node_reuses_exact_analyzed_variant(self):
+        job = self.analyze(self.preview())
+        expected = self.expand(job)['nodes'][0]
+        count = len(self.encoders[0].seen)
+        self.assertEqual(self.manager.discovery_node(job['id'], 0, expected['id']), expected)
+        self.assertEqual(len(self.encoders[0].seen), count)
+
     def test_task_input_and_action_changes_do_not_share_cached_features(self):
         first = self.analyze(self.preview())
         second = self.analyze(self.preview(text='A different input.'))

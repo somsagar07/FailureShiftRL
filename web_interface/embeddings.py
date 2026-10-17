@@ -34,7 +34,13 @@ def _selection(model, task='classification'):
         name = str(path)
     elif not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?', name) or '..' in name:
         raise ValueError('Use a Hugging Face model ID, for example google/vit-base-patch16-224.')
-    return {'source': model['source'], 'name': name, 'task': task}
+    selection = {'source': model['source'], 'name': name, 'task': task}
+    revision = model.get('revision')
+    if revision is not None:
+        if not isinstance(revision, str) or not revision.strip() or len(revision) > 256:
+            raise ValueError('The model revision must be a branch, tag, or commit name.')
+        selection['revision'] = revision
+    return selection
 
 
 def _model_key(model):
@@ -42,7 +48,8 @@ def _model_key(model):
     if model['source'] == 'local':
         root = Path(model['name'])
         # A replaced checkpoint/processor at the same path must not reuse features.
-        identity['files'] = [(path.relative_to(root).as_posix(), path.stat().st_size, path.stat().st_mtime_ns)
+        identity['files'] = [(path.relative_to(root).as_posix(), path.stat().st_size,
+                              path.stat().st_mtime_ns, path.stat().st_ctime_ns)
                              for path in sorted(root.rglob('*')) if path.is_file()]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
@@ -78,6 +85,22 @@ class HuggingFaceEncoder:
             raise ValueError(f'Could not load image model {selection["name"]}: {exc}') from exc
         self.revision = getattr(self.model.config, '_commit_hash', None)
         self.feature_method = None
+
+    def share_classifier(self, evaluator):
+        """Use the validated classifier's identical CPU base without duplicate weights."""
+        if evaluator.device != 'cpu':
+            return
+        base = evaluator.model.base_model
+        if base is self.model:
+            return
+        if type(base) is not type(self.model):
+            return
+        original = self.model.state_dict()
+        replacement = base.state_dict()
+        retained = {key for key in original if not (self._skip_pooler and 'pooler' in key.split('.'))}
+        if retained != set(replacement) or any(original[key].shape != replacement[key].shape for key in retained):
+            return
+        self.model = base
 
     def encode(self, images):
         torch = self.torch
@@ -198,6 +221,11 @@ class EmbeddingManager:
         self._active_expansion = None
         self._encoder = None
         self._encoder_key = None
+        self._encoder_identity = None
+        self._evaluator = None
+        self._evaluator_key = None
+        self._evaluator_identity = None
+        self._discovery_nodes = {}
         self._revisions = {}
 
     def get(self, job_id):
@@ -226,10 +254,114 @@ class EmbeddingManager:
                         model=model, states=states, model_key=base['model_key'])
 
     def release_encoder(self):
-        """Release cached weights before another model-heavy job takes ownership."""
+        """Invalidate all retained inference weights before training or a model switch."""
         with self.model_lock:
             self._encoder = None
             self._encoder_key = None
+            self._encoder_identity = None
+            self._release_evaluator()
+
+    def _release_evaluator(self):
+        previous = self._evaluator
+        self._evaluator = None
+        self._evaluator_key = None
+        self._evaluator_identity = None
+        if previous is not None:
+            previous.close()
+
+    def _model_identity(self, model):
+        selected = _selection(model, model.get('task', 'classification'))
+        revision = self._revisions.get(_model_key(selected))
+        if revision and selected['source'] != 'local':
+            selected['revision'] = revision
+        return _model_key(selected)
+
+    def evaluation_model(self, model, config, directory, progress=None):
+        """Reuse one model/scorer set; each caller receives independent run settings.
+
+        Callers hold model_lock throughout inference. The returned evaluator may
+        be closed normally: the manager retains the shared, read-only weights.
+        Training uses uncached adapters after release_encoder().
+        """
+        from discovery_models import _dependencies, _device, create_evaluator
+        with self.model_lock:
+            selection = _selection(model, config.get('task', model.get('task', 'classification')))
+            requested_key = _model_key(selection)
+            revision = self._revisions.get(requested_key)
+            if revision and selection['source'] != 'local':
+                selection['revision'] = revision
+            identity = self._model_identity(selection)
+            torch, _ = _dependencies()
+            resources = {'device': _device(torch, config),
+                         'summary_metric': config.get('summary_metric', 'reference')}
+            for name in ('_nli_model', '_clip_model'):
+                if config.get(name) is not None:
+                    scorer = _selection(config[name], 'summarization' if name == '_nli_model' else 'classification')
+                    resources[name] = _model_key(scorer)
+            resource_key = json.dumps(resources, sort_keys=True)
+            key = (identity, resource_key)
+            shared = self._evaluator if self._evaluator_key == key else None
+            if shared is None:
+                self._release_evaluator()
+                if self._encoder is not None and self._encoder_identity != identity:
+                    self._encoder = None
+                    self._encoder_key = None
+                    self._encoder_identity = None
+            # Analyze uses CPU float32. Sharing with CUDA would change its
+            # numerical path, so preserve the CPU encoder for that device mode.
+            encoder = self._encoder if self._encoder_identity == identity and resources['device'] == 'cpu' else None
+            evaluator = create_evaluator(selection, config, directory, progress, encoder=encoder, shared=shared)
+            self._revisions[requested_key] = getattr(evaluator, 'revision', None)
+            self._revisions[_model_key(selection)] = getattr(evaluator, 'revision', None)
+            identity = self._model_identity(selection)
+            if encoder is not None and isinstance(encoder, HuggingFaceEncoder):
+                encoder.share_classifier(evaluator)
+            self._evaluator = copy.copy(evaluator)
+            self._evaluator._shared_resources = False
+            self._evaluator_key = (identity, resource_key)
+            self._evaluator_identity = identity
+            evaluator._shared_resources = True
+            return evaluator
+
+    def discovery_node(self, job_id, input_index, action_id, evaluator=None):
+        """Project only a measured action, without queuing a full graph expansion."""
+        import numpy as np
+        with self.model_lock:
+            with self.lock:
+                job = copy.deepcopy(self.jobs[job_id])
+                if job['status'] != 'completed':
+                    raise ValueError('Finish Analyze before projecting discoveries.')
+                if type(input_index) is not int or not 0 <= input_index < len(job['points']):
+                    raise ValueError('Select an available input.')
+                base = self._job_bases[job_id]
+                if job['model']['source'] == 'local' and _model_key(job['model']) != base['model_key']:
+                    raise ValueError('The local model changed after analysis. Analyze the input again.')
+                cached = self._expansion_cache.get((job_id, input_index))
+                if cached is not None:
+                    node = next((node for node in cached['nodes'] if node['id'] == action_id), None)
+                    if node is None:
+                        raise ValueError('Select an available action.')
+                    return copy.deepcopy(node)
+                cache_key = (job_id, input_index, action_id)
+                if cache_key in self._discovery_nodes:
+                    return copy.deepcopy(self._discovery_nodes[cache_key])
+            preview = self.previews.get(job['preview_id'], input_index)
+            entry = next((node for node in preview['nodes'] if node['id'] == action_id), None)
+            if entry is None:
+                raise ValueError('Select an available action.')
+            if job['task'] != 'classification':
+                raise ValueError('The analyzed text variants are unavailable. Analyze again.')
+            encoder = self._load_encoder(job['model'], base['model_key'])
+            image = apply_image(self._original_image(job['preview_id'], input_index), entry['action'])
+            value = _normalize(encoder.encode([image]), 1, base['feature_dim'])[0]
+            features = np.load(base['path'], mmap_mode='r')
+            node = dict(id=entry['id'], action=entry['action'], image=entry['image'],
+                        position=((value-base['mean']) @ base['components'].T).tolist(),
+                        similarity=float(np.clip(value @ features[input_index], -1, 1)),
+                        neighbors=self._neighbors(features, value, job['points']))
+            with self.lock:
+                self._discovery_nodes[cache_key] = copy.deepcopy(node)
+            return node
 
     def get_expansion(self, job_id, expansion_id):
         with self.lock:
@@ -332,13 +464,24 @@ class EmbeddingManager:
             # Release the previous model before allocating its replacement.
             self._encoder = None
             self._encoder_key = None
+            self._encoder_identity = None
+            identity = self._model_identity(model)
+            if self._evaluator_identity != identity:
+                self._release_evaluator()
             options = dict(model)
             if self._revisions.get(key):
                 options['revision'] = self._revisions[key]
-            encoder = self.encoder_factory(options)
+            retained = self._evaluator
+            if retained is not None and retained.device == 'cpu' and hasattr(retained, 'encoder'):
+                encoder = retained.encoder
+            else:
+                encoder = self.encoder_factory(options)
+                if retained is not None and isinstance(encoder, HuggingFaceEncoder):
+                    encoder.share_classifier(retained)
             self._encoder = encoder
             self._encoder_key = key
             self._revisions[key] = getattr(encoder, 'revision', None)
+            self._encoder_identity = self._model_identity(model)
         return self._encoder
 
     def _check_pca_size(self, count, dimension):

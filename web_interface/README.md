@@ -156,6 +156,17 @@ FLUX, single-file checkpoints, and custom-code pipelines are not supported by th
 adapter. An incompatible selection reports an error without substituting another
 model. Prompt length is checked against the encoder's token limit.
 
+The running server retains one active model family and its evaluation scorers.
+Repeated discovery runs reuse loaded weights while creating fresh per-run scoring
+settings, seeds, output paths, and measurements. CPU summarization and generation
+reuse the encoder already loaded by Analyze; classification loads its pretrained
+head on the first discovery and shares the compatible base model afterward.
+Switching model families evicts the previous evaluation resources, and fine-tuning
+clears the inference cache before loading trainable weights. Local checkpoint
+changes invalidate reuse. Keeping the server running avoids repeated weight loads;
+the first download/load and actual inference still take time. Restarting clears
+the memory cache but preserves downloaded Hugging Face files on disk.
+
 ## Explore the graph
 
 The interaction idea comes from [Graphify](https://github.com/Graphify-Labs/graphify).
@@ -165,7 +176,8 @@ The viewers run locally without a graph package, external JavaScript, or CDN.
   Shift-drag (or right-drag) to pan, and scroll or use **+ / −** to zoom.
 - **Expand:** click a point or choose a **Dataset image**. Other originals dim while
   warm-colored action points appear, connected to the selected original. Other
-  dimmed images remain selectable.
+  dimmed images remain selectable. Expansion preserves your zoom, pan, and rotation;
+  use **Fit** explicitly if you want to frame the new points.
 - **Inspect:** click an action point or choose it from **Preview**. The inspector
   shows the original and altered input, action values, and cosine similarity to
   the original. The dropdown also reaches coincident or occluded points.
@@ -178,8 +190,27 @@ high, and gray is unevaluated. Original points average their measured action pai
 expanded nodes show the score for that particular input/action. A pulse identifies
 the current input/action. Colors never move the points or change the camera.
 Use the measured-pair selector to inspect visited examples without requesting
-all action embeddings. New action expansion waits until model training/search
-finishes; already computed expansions remain selectable.
+all action embeddings. During search, selecting an original shows its measured
+action nodes as they become available. Each new image variant is embedded once
+using the analysis model and the same fitted PCA; text/prompt action positions are
+already available from Analyze. Previously expanded nodes also remain selectable.
+Progress updates preserve your selection and camera, including clicks that span a
+status refresh. Expanding every remaining image action can be requested after search.
+
+Action sphere size reflects **variation in DQN action preference across original
+inputs**: lower variation means a larger sphere. The inspector gives the action's
+mean preference, sample standard deviation, original-input count, and the number of
+inputs actually tested with that action. This follows the original experiment's
+`softmax(Q)` summary, with the size ordering reversed. The mean is a relative policy
+preference, not a failure probability; the spread is not calibrated model confidence.
+Equal spreads have equal sizes, and unknown spread uses a small outlined sphere.
+Input parents keep their own visual sizes and measured-severity colors.
+
+Statistics use one current DQN checkpoint over the original input embeddings and
+refresh periodically during search and at completion. Cached repeats do not add
+statistical samples. Before the first optimizer update, there are no learned policy
+statistics. With a single original image, article, or prompt, the spread is unknown;
+the current summarization and generation workspaces each accept one original input.
 
 ## Discovery and rewards
 
@@ -195,7 +226,8 @@ This implements macroscopic search, not a sequence of incremental corruptions.
 Baselines and variants use the same model revision and inference settings.
 Deterministic input/action outcomes are cached within each run; repeated episodes
 still update the DQN. The interface distinguishes episodes, unique measured pairs
-and actual selected-model calls. NLI/CLIP scorer calls are additional work.
+and actual selected-model prediction calls. Graph embedding and NLI/CLIP scorer
+calls are additional work.
 Each run gets its own seed; generation uses the same noise seed for an input's
 baseline and all its variants so changes can be compared. To explore another noise
 realization, start a new run with a different seed.

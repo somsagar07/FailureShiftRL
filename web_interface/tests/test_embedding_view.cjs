@@ -17,12 +17,13 @@ class Canvas {
       globalAlpha: 1, circles: [], strokes: [], labels: [],
       clearRect() {this.circles = []; this.strokes = []; this.labels = [];},
       setTransform(...values) {this.transform = values;},
+      setLineDash(values) {this.dashes = values.slice();},
       beginPath() {this.path = [];},
       arc(x, y, radius) {this.path.push({x, y, radius});},
       moveTo(x, y) {this.path.push({x, y});},
       lineTo(x, y) {this.path.push({x, y});},
       fill() {this.circles.push(...this.path.map(p => ({...p, color: this.fillStyle, alpha: this.globalAlpha})));},
-      stroke() {this.strokes.push({path: this.path.slice(), color: this.strokeStyle, alpha: this.globalAlpha});},
+      stroke() {this.strokes.push({path: this.path.slice(), color: this.strokeStyle, alpha: this.globalAlpha, dashes: this.dashes?.slice()||[]});},
       fillText(text, x, y) {this.labels.push({text, x, y});},
     };
     this.getContext = kind => {assert.equal(kind, '2d'); return ctx;};
@@ -403,6 +404,48 @@ test('discovery colors only measured pairs, aggregates observed originals and pr
   assert.equal(view.severities.get(0),.5);
   assert.ok(!canvas.context.strokes.some(stroke=>stroke.color==='#203f72'),'terminal jobs stop the pulse');
   view.setDiscovery(null);assert.equal(view.discovery,null);
+});
+
+test('action size ranks cross-input preference variation, preserves ties and distinguishes unknown values',()=>{
+  const {view,canvas}=setup();
+  view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setExpansion(0,[action(0,[-.5,.5,0]),action(1,[0,.5,0]),action(2,[.5,.5,0]),action(3,[-.5,-.5,0]),action(4,[.5,-.5,0])]);
+  const originalRadius=view.projected.find(node=>node.kind==='sample'&&node.data.index===0).radius;
+  const positions=view.projected.map(node=>({kind:node.kind,id:node.data.id??node.data.index,x:node.x,y:node.y}));
+  const statistics={method:'softmax_q_across_original_inputs',temperature:1,input_count:4,policy_updates:10,std_ddof:1,actions:[
+    {action_id:0,mean:.6,std:.02,evaluated_inputs:3},
+    {action_id:1,mean:.5,std:.08,evaluated_inputs:2},
+    {action_id:2,mean:.3,std:.20,evaluated_inputs:1},
+    {action_id:3,mean:.4,std:.08,evaluated_inputs:2},
+    {action_id:4,mean:.1,std:null,evaluated_inputs:0},
+  ]};
+  view.setDiscovery({status:'completed',records:[{input_index:0,action_id:0,severity:.9},{input_index:0,action_id:2,severity:.1}],policy_statistics:statistics});
+  const byId=id=>view.projected.find(node=>node.kind==='action'&&node.data.id===id);
+  assert.ok(byId(0).radius>byId(1).radius&&byId(1).radius>byId(2).radius,'higher variation produces smaller actions at the same depth');
+  assert.equal(byId(1).radius,byId(3).radius,'equal variation cannot acquire an arbitrary size order');
+  assert.ok(byId(4).radius<byId(2).radius,'unknown variation cannot appear maximally certain');
+  assert.equal(view.projected.find(node=>node.kind==='sample'&&node.data.index===0).radius,originalRadius,'original nodes remain role markers');
+  assert.deepEqual(view.projected.map(node=>({kind:node.kind,id:node.data.id??node.data.index,x:node.x,y:node.y})),positions);
+  assert.equal(circles(canvas)[view.projected.indexOf(byId(0))].color,view.severityColor(.9),'size does not change measured-severity color');
+  assert.equal(circles(canvas)[view.projected.indexOf(byId(2))].color,view.severityColor(.1));
+  assert.ok(canvas.context.strokes.some(stroke=>stroke.dashes.length&&stroke.path.some(p=>p.x===byId(4).x&&p.y===byId(4).y)),'unknown variation has a distinct rim');
+  const selectedRadius=byId(2).radius;view.selectAction(2);assert.equal(byId(2).radius,selectedRadius,'selection emphasis cannot override uncertainty size');
+  const hovered=byId(0);canvas.fire('pointermove',{clientX:canvas.box.left+hovered.x,clientY:canvas.box.top+hovered.y});
+  assert.match(canvas.title,/mean DQN action preference: 0\.600/i);assert.match(canvas.title,/sample SD.*0\.0200/i);
+  assert.match(canvas.title,/4 original inputs/i);assert.match(canvas.title,/tested inputs: 3\/4/i);assert.match(canvas.title,/not calibrated/i);
+});
+
+test('single-input and untrained policy statistics remain unknown; tied statistics use a neutral size',()=>{
+  for(const [input_count,policy_updates,std,reason] of [[1,10,null,/at least 2 original inputs/i],[4,0,0,/no policy updates/i]]) {
+    const {view,canvas}=setup();view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);view.setExpansion(0,[action(0,[0,.5,0])]);
+    view.setDiscovery({status:'completed',records:[],policy_statistics:{input_count,policy_updates,actions:[{action_id:0,mean:.5,std,evaluated_inputs:1}]}});
+    const p=view.projected.find(node=>node.kind==='action');canvas.fire('pointermove',{clientX:canvas.box.left+p.x,clientY:canvas.box.top+p.y});
+    assert.match(canvas.title,/variation.*unavailable/i);assert.match(canvas.title,reason);
+    assert.ok(canvas.context.strokes.some(stroke=>stroke.dashes.length),'undefined variation stays visibly unknown');
+  }
+  const {view,canvas}=setup();view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);view.setExpansion(0,[action(0,[-.5,.5,0]),action(1,[.5,.5,0])]);
+  view.setDiscovery({status:'completed',records:[],policy_statistics:{input_count:2,policy_updates:10,actions:[{action_id:0,mean:.4,std:.1,evaluated_inputs:1},{action_id:1,mean:.6,std:.1,evaluated_inputs:1}]}});
+  const actions=view.projected.filter(node=>node.kind==='action');assert.equal(actions[0].radius,actions[1].radius);finiteDrawing(canvas);
 });
 
 let failures = 0;

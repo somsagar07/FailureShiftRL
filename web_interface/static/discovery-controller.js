@@ -30,7 +30,7 @@ class DiscoveryController {
   }
   hideResults() {
     for(const id of ['discovery-inspector','discovery-records','finetune-panel','severity-legend','finetune-checkpoint'])this.el(id).hidden=true;
-    this.explorer.view.setDiscovery?.(null);
+    if(this.explorer.setDiscovery)this.explorer.setDiscovery(null);else this.explorer.view.setDiscovery?.(null);
   }
   configure() {
     const task=this.explorer.task;
@@ -51,7 +51,7 @@ class DiscoveryController {
     this.el('finetune-panel').hidden=true;this.el('severity-legend').hidden=true;
     this.el('finetune-target').value='';this.el('finetune-examples').replaceChildren();
     this.el('finetune-checkpoint').hidden=true;
-    this.explorer.view.setDiscovery?.(null);
+    if(this.explorer.setDiscovery)this.explorer.setDiscovery(null);else this.explorer.view.setDiscovery?.(null);
     if(!this.active) {
       this.version++;clearTimeout(this.timer);this.job=null;this.training=null;
       this.el('discovery-panel').hidden=true;
@@ -97,7 +97,10 @@ class DiscoveryController {
       this.el('discovery-status').textContent='Starting discovery…';
       const job=await this.api('/api/discoveries',config);
       if(version!==this.version)return;
-      this.pending=false;this.job=job;this.examples=[];this.selected=null;this.inspectedIndex=null;this.selectionTouched=false;this.training=null;
+      this.pending=false;this.job=job;this.examples=[];this.training=null;
+      const point=this.explorer.point,action=this.explorer.action;
+      this.inspectedIndex=point?.index??null;this.selectionTouched=Boolean(point);
+      this.selected=point&&action!==null&&action!==undefined?`${point.index}:${action}`:null;
       this.el('finetune-examples').replaceChildren();this.el('finetune-checkpoint').hidden=true;
       this.el('finetune-status').textContent='';this.receive('discoveries',job,version);
     } catch(error) {if(version!==this.version)return;this.pending=false;this.message(error.message);this.controls();}
@@ -136,7 +139,8 @@ class DiscoveryController {
     for(const [name,url] of Object.entries(job.artifacts||{})){if(typeof url!=='string'||!url.startsWith('/discoveries/'))continue;const a=document.createElement('a');a.textContent=`Download ${name}`;a.href=url;links.push(a);}
     this.el('discovery-artifacts').replaceChildren(...links);
     if(!this.attached){this.hideResults();return;}
-    this.el('severity-legend').hidden=false;this.explorer.view.setDiscovery(job);
+    this.el('severity-legend').hidden=false;
+    if(this.explorer.setDiscovery)this.explorer.setDiscovery(job);else this.explorer.view.setDiscovery(job);
     const records=job.records||[],selector=this.el('discovery-pair');
     selector.replaceChildren(...records.map(record=>{const option=document.createElement('option');option.value=this.key(record);option.textContent=`Input ${record.input_index} · action ${record.action_id} · severity ${this.format(record.severity)} (${record.visits} visits)`;return option;}));
     if(!this.selected&&!this.selectionTouched)this.selected=records.length?this.key(records[0]):null;
@@ -170,17 +174,30 @@ class DiscoveryController {
     if(!children.length)children.push(this.paragraph('No model output available.'));
     this.el(id).replaceChildren(...children);
   }
-  metricRows(record) {
+  policyRows(action) {
+    const statistics=this.job?.policy_statistics;
+    if(!statistics||action===null||action===undefined)return [];
+    const entry=statistics.actions?.find(item=>item.action_id===action),updated=statistics.policy_updates>0;
+    const number=value=>Number.isFinite(value)?value.toPrecision(3):'Unavailable';
+    const reason=!updated?'no policy updates yet':statistics.input_count<2?'requires at least 2 original inputs':'not available';
+    const variation=updated&&statistics.input_count>1&&Number.isFinite(entry?.std)?number(entry.std):`Unavailable (${reason})`;
+    return [['Mean DQN action preference',updated?number(entry?.mean):'Unavailable (no policy updates yet)'],
+      ['Preference variation (sample SD)',variation],['Original inputs in policy statistics',String(statistics.input_count)],
+      ['Tested inputs for this action',`${entry?.evaluated_inputs??'—'} / ${statistics.input_count}`]];
+  }
+  metricRows(record,action=record?.action_id) {
     const labels={target_id:'Target class ID',target_label:'Target label',target_probability:'Target confidence',baseline_target_probability:'Original target confidence',target_confidence:'Target confidence',baseline_target_confidence:'Original target confidence',error:'Prediction differs from target',new_error:'New error after action',safety_filtered:'Image filtered by safety checker',confidence_drop:'Target confidence drop',baseline_error:'Original already incorrect',prediction_changed:'Prediction changed',labelled:'Human label supplied',rouge_l:'Reference overlap (ROUGE-L F1)',nonrepetition:'Distinct bigram ratio',source_support:'Source support (NLI)',quality:'Quality review score',baseline_quality:'Original quality score',quality_drop:'Quality drop from original',baseline_low_quality:'Original has low quality',clip_similarity:'CLIP prompt alignment',baseline_clip_similarity:'Original CLIP prompt alignment'};
-    const rows=[['Criterion',record.criterion||this.job?.criterion||'—'],['Severity',this.percent(record.severity)],['Search reward',this.format(record.reward)],['Observed failure rate',this.percent(record.failure_rate)]];
-    for(const [key,value] of Object.entries(record.metrics||{})) {
+    const rows=record?[['Criterion',record.criterion||this.job?.criterion||'—'],['Severity',this.percent(record.severity)],['Search reward',this.format(record.reward)],['Observed failure rate',this.percent(record.failure_rate)]]:[];
+    rows.push(...this.policyRows(action));
+    for(const [key,value] of Object.entries(record?.metrics||{})) {
       const label=labels[key]||key.replaceAll('_',' ').replace(/^./,letter=>letter.toUpperCase());
       const display=typeof value==='boolean'?(value?'Yes':'No'):typeof value==='number'?this.format(value):String(value??'—');
       rows.push([label,display]);
     }
     const list=document.createElement('dl');list.className='metric-rows';
     for(const [label,value] of rows){const name=document.createElement('dt'),detail=document.createElement('dd');name.textContent=label;detail.textContent=value;list.append(name,detail);}
-    this.el('discovery-components').textContent='';this.el('discovery-components').replaceChildren(list);
+    this.el('discovery-components').replaceChildren();this.el('discovery-components').textContent=record?'':'This action has not been evaluated.';
+    if(rows.length)this.el('discovery-components').append(list);
   }
   inspectSelected(focus=false,baselineIndex=null) {
     if(!this.attached){this.hideResults();return;}
@@ -190,7 +207,7 @@ class DiscoveryController {
     this.el('discovery-inspector').hidden=index===null||index===undefined;
     if(index===null||index===undefined)return;
     this.output('discovery-baseline',baseline?.output);this.output('discovery-output',record?.output);
-    if(record)this.metricRows(record);else {this.el('discovery-components').replaceChildren();this.el('discovery-components').textContent='This action has not been evaluated.';}
+    this.metricRows(record,record?.action_id??(this.selected?Number(this.selected.split(':')[1]):null));
     if(focus&&record)this.explorer.focusMeasured(record.input_index,record.action_id);
     this.controls();
   }

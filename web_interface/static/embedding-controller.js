@@ -26,7 +26,8 @@ class EmbeddingExplorer {
 
   reset() {
     this.run++;this.selection++;clearTimeout(this.timer);clearTimeout(this.expansionTimer);
-    this.job=null;this.preview=null;this.point=null;this.expansion=null;this.expansionCache=new Map();
+    this.job=null;this.preview=null;this.point=null;this.action=null;this.expansion=null;this.expansionCache=new Map();
+    this.discovery=null;this.measuredCache=new Map();
     this.view.reset();this.control('embedding-wrap').hidden=true;
     this.control('embedding-actions').hidden=true;
     this.control('embedding-back').disabled=true;
@@ -78,7 +79,7 @@ class EmbeddingExplorer {
     const point=this.job?.points.find(point=>point.index===index);
     if(!point)return;
     const run=this.run,selection=++this.selection;
-    clearTimeout(this.expansionTimer);this.point=point;this.expansion=null;
+    clearTimeout(this.expansionTimer);this.point=point;this.action=null;this.expansion=null;
     this.view.focus(index);this.control('embedding-back').disabled=false;
     this.control('embedding-actions').hidden=true;
     this.control('embedding-focus').textContent=`${point.name} · computing action embeddings…`;
@@ -87,8 +88,10 @@ class EmbeddingExplorer {
     if(this.expansionCache.has(index)) {
       await this.receiveExpansion(this.expansionCache.get(index),run,selection);return;
     }
+    const measured=this.measuredExpansion(index);
+    if(measured)this.showExpansion(measured);
     if(this.isDiscoveryActive?.()) {
-      this.control('embedding-focus').textContent=`${point.name} · live discovery; inspect measured actions below. Select this input after discovery to compute all action embeddings.`;
+      if(!measured)this.control('embedding-focus').textContent=`${point.name} · live discovery · waiting for measured actions…`;
       return;
     }
     try {
@@ -117,11 +120,42 @@ class EmbeddingExplorer {
     }
     if(job.status!=='completed')throw new Error(job.error||'Could not compute the action embeddings.');
     if(job.input_index!==this.point.index)return;
-    this.expansionCache.set(job.input_index,job);this.expansion=job;this.view.setExpansion(job.input_index,job.nodes);this.view.fit();
+    this.expansionCache.set(job.input_index,job);this.showExpansion(job);
+  }
+
+  measuredExpansion(index) {
+    const nodes=this.measuredCache.get(index);
+    return nodes?.size?{input_index:index,nodes:[...nodes.values()].sort((a,b)=>a.id-b.id),partial:true}:null;
+  }
+
+  showExpansion(expansion) {
+    if(expansion.input_index!==this.point?.index)return;
+    this.expansion=expansion;this.view.setExpansion(expansion.input_index,expansion.nodes);
+    this.view.selectAction(this.action);
     const choice=(value,label)=>{const el=document.createElement('option');el.value=value;el.textContent=label;return el;};
-    this.control('embedding-action').replaceChildren(choice('original','Original input'),...job.nodes.map(node=>choice(String(node.id),`Combination ${node.id+1} · ${this.describeAction(node.action)}${node.unchanged?' · unchanged':''}`)));
-    this.control('embedding-action').value='original';this.control('embedding-actions').hidden=false;
-    this.control('embedding-focus').textContent=`${this.point.name} · ${job.nodes.length} action combinations`;
+    this.control('embedding-action').replaceChildren(choice('original','Original input'),...expansion.nodes.map(node=>choice(String(node.id),`Combination ${node.id+1} · ${this.describeAction(node.action)}${node.unchanged?' · unchanged':''}`)));
+    this.control('embedding-action').value=this.action===null?'original':String(this.action);this.control('embedding-actions').hidden=false;
+    this.control('embedding-focus').textContent=`${this.point.name} · ${expansion.nodes.length} ${expansion.partial?'measured actions':'action combinations'}${expansion.partial&&this.isDiscoveryActive?.()?' · live discovery':''}`;
+  }
+
+  setDiscovery(job) {
+    if(!job||job.id!==this.discovery?.id)this.measuredCache.clear();
+    this.discovery=job;this.view.setDiscovery(job);
+    for(const record of job?.records||[]) {
+      const node=record.node;
+      // Plot only model coordinates supplied for this input/action pair.
+      if(!node||node.id!==record.action_id||!Array.isArray(node.position)||node.position.length!==3||!node.position.every(Number.isFinite)||!this.job?.points.some(point=>point.index===record.input_index))continue;
+      if(!this.measuredCache.has(record.input_index))this.measuredCache.set(record.input_index,new Map());
+      this.measuredCache.get(record.input_index).set(node.id,node);
+    }
+    if(!this.point)return;
+    const expansion=this.expansionCache.get(this.point.index)||this.measuredExpansion(this.point.index);
+    if(expansion)this.showExpansion(expansion);
+    else if(this.expansion?.partial) {
+      this.expansion=null;this.view.setExpansion(this.point.index,[]);
+      this.control('embedding-actions').hidden=true;
+      this.control('embedding-focus').textContent=this.point.name;
+    }
   }
 
   failExpansion(error,run,selection) {
@@ -132,27 +166,27 @@ class EmbeddingExplorer {
 
   inspect(node) {
     if(!this.point)return;
-    this.view.selectAction(node?.id??null);
+    this.action=node?.id??null;this.view.selectAction(this.action);
     this.control('embedding-action').value=node?String(node.id):'original';
     this.onInspect(this.point,node||null,this.preview.config);this.onInspectPair?.(this.point.index,node?.id??null);
   }
 
   focusMeasured(index,action) {
     const point=this.job?.points.find(point=>point.index===index);if(!point)return;
-    this.selection++;clearTimeout(this.expansionTimer);this.point=point;
-    this.expansion=this.expansionCache.get(index)||null;
+    this.selection++;clearTimeout(this.expansionTimer);this.point=point;this.action=action;
+    this.expansion=this.expansionCache.get(index)||this.measuredExpansion(index);
     this.view.focus(index);
-    if(this.expansion)this.view.setExpansion(index,this.expansion.nodes);
+    if(this.expansion)this.showExpansion(this.expansion);
     this.view.selectAction(action);
     this.control('embedding-back').disabled=false;
-    this.control('embedding-focus').textContent=`${point.name} · measured action ${action}`;
-    this.control('embedding-actions').hidden=true;
+    if(!this.expansion)this.control('embedding-focus').textContent=`${point.name} · measured action ${action}`;
+    this.control('embedding-actions').hidden=!this.expansion;
     if(this.task==='classification')this.onSelectInput(index);
     this.onInspect(point,this.expansion?.nodes.find(node=>node.id===action)||null,this.preview.config);
   }
 
   clearFocus() {
-    this.selection++;clearTimeout(this.expansionTimer);this.point=null;this.expansion=null;
+    this.selection++;clearTimeout(this.expansionTimer);this.point=null;this.action=null;this.expansion=null;
     this.view.clearFocus();this.control('embedding-actions').hidden=true;
     this.control('embedding-back').disabled=true;this.control('embedding-focus').textContent='';
     this.onInspect(null,null);this.onInspectPair?.(null,null);this.onError('');

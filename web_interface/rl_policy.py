@@ -1,7 +1,9 @@
 """Finite, one-step DQN on normalized original model features.
 
 Every transition terminates after one action: the TD target is its measured
-reward. There is deliberately no bootstrapped future reward or Q softmax.
+reward. There is deliberately no bootstrapped future reward. A separate
+softmax-Q summary follows the original experiment's visualization convention;
+it never changes the training target or epsilon-greedy action selection.
 """
 import math
 import random
@@ -86,3 +88,42 @@ class TerminalDQN:
                              optimizer_state=self.optimizer.state_dict(),
                              target='observed terminal reward; no bootstrap'), temporary)
         temporary.replace(path)
+
+    def action_statistics(self, states):
+        """Describe action preference variation over originals, not failure odds.
+
+        This is a single current checkpoint evaluated on every original state.
+        Repeated RL visits supply no additional statistical samples. Variation
+        across inputs is undefined for a single article, prompt, or image.
+        """
+        states = np.asarray(states, dtype=np.float32)
+        if (states.ndim != 2 or not len(states) or states.shape[1] != self.state_dimension
+                or not np.isfinite(states).all()):
+            raise ValueError('Policy statistics require finite original embedding vectors.')
+        result = dict(method='softmax_q_across_original_inputs', temperature=1,
+                      input_count=len(states), policy_updates=self.updates, std_ddof=1, actions=[])
+        if not self.updates:
+            return result
+        # Merge batch moments instead of retaining an inputs-by-actions matrix.
+        count = 0
+        means = np.zeros(self.action_count, dtype=np.float64)
+        squared_deviations = np.zeros_like(means)
+        with self.torch.inference_mode():
+            for offset in range(0, len(states), 256):
+                values = self.network(self.torch.from_numpy(states[offset:offset+256]))
+                if not self.torch.isfinite(values).all():
+                    raise ValueError('Policy produced nonfinite action values.')
+                preferences = values.softmax(dim=-1).to(dtype=self.torch.float64).cpu().numpy()
+                batch_mean = preferences.mean(axis=0)
+                batch_count = len(preferences)
+                total = count + batch_count
+                delta = batch_mean - means
+                squared_deviations += ((preferences-batch_mean)**2).sum(axis=0)
+                squared_deviations += delta**2 * (count * batch_count / total)
+                means += delta * (batch_count / total)
+                count = total
+        spreads = np.sqrt(squared_deviations / (count-1)) if count > 1 else None
+        result['actions'] = [dict(action_index=index, mean=float(mean),
+                                  std=float(spreads[index]) if spreads is not None else None)
+                             for index, mean in enumerate(means)]
+        return result

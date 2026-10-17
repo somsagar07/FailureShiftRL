@@ -153,7 +153,7 @@ class DiscoveryManager:
                    episodes=settings['episodes'], epsilon=1., loss=None, reward=None,
                    mean_reward=0., model_calls=0, unique_evaluations=0, criterion='',
                    config=settings, model=copy.deepcopy(context['model']), current=None,
-                   records=[], history=[], baseline=[], artifacts={})
+                   records=[], history=[], baseline=[], artifacts={}, policy_statistics=None)
         return self._launch(job, context, self._discover)
 
     def _launch(self, job, context, worker):
@@ -211,7 +211,7 @@ class DiscoveryManager:
             raise InterruptedError('Cancelled by user.')
 
     @contextmanager
-    def _model_access(self, job_id):
+    def _model_access(self, job_id, *, retain_models=False):
         while not self.embeddings.model_lock.acquire(timeout=.1):
             self._check(job_id)
         try:
@@ -221,7 +221,8 @@ class DiscoveryManager:
             if fresh['model_key'] != context['model_key']:
                 raise ValueError('The model changed while this job was waiting. Analyze again.')
             del fresh
-            self.embeddings.release_encoder()
+            if not retain_models:
+                self.embeddings.release_encoder()
             yield
         finally:
             self.embeddings.model_lock.release()
@@ -276,6 +277,17 @@ class DiscoveryManager:
             raise ValueError('Evaluator returned an invalid measured score.')
         return score
 
+    def _policy_statistics(self, job_id, policy, context, records):
+        statistics = policy.action_statistics(context['states'])
+        actions = context['preview']['actions']
+        coverage = {}
+        for record in records:
+            coverage.setdefault(record['action_id'], set()).add(record['input_index'])
+        for action in statistics['actions']:
+            action['action_id'] = actions[action.pop('action_index')]['id']
+            action['evaluated_inputs'] = len(coverage.get(action['action_id'], ()))
+        self._update(job_id, policy_statistics=statistics)
+
     def _discover(self, job_id):
         evaluator, policy = None, None
         status, error = 'completed', None
@@ -285,12 +297,9 @@ class DiscoveryManager:
         try:
             self._update(job_id, status='running', phase='waiting for model')
             with ExitStack() as cleanup:
-                cleanup.enter_context(self._model_access(job_id))
+                cleanup.enter_context(self._model_access(job_id, retain_models=True))
                 self._update(job_id, phase='loading selected model and scorers')
-                factory = self.evaluator_factory
-                if factory is None:
-                    from discovery_models import create_evaluator
-                    factory = create_evaluator
+                factory = self.evaluator_factory or self.embeddings.evaluation_model
                 evaluator = factory(context['model'], config, directory,
                                     progress=lambda **fields: self._progress(job_id, **fields))
                 cleanup.callback(evaluator.close)
@@ -306,7 +315,7 @@ class DiscoveryManager:
                 actions = context['preview']['actions']
                 policy = TerminalDQN(states.shape[1], len(actions), seed=config['seed'])
                 rng = random.Random(config['seed'])
-                baseline_cache, pair_cache, aggregates = {}, {}, {}
+                baseline_cache, pair_cache, aggregates, nodes = {}, {}, {}, {}
                 total_reward = 0.
                 with (directory/'episodes.jsonl').open('a') as stream:
                     for episode in range(1, config['episodes']+1):
@@ -345,12 +354,19 @@ class DiscoveryManager:
                                       severity=score['severity'], failure_rate=float(score['failure']),
                                       reward=score['reward'], failure=score['failure'], output=output,
                                       metrics=score['metrics'], criterion=score['criterion'])
+                        if pair not in nodes and not self._events[job_id].is_set():
+                            nodes[pair] = self.embeddings.discovery_node(
+                                context['job']['id'], index, action_id, evaluator=evaluator)
+                        if pair in nodes:
+                            record['node'] = nodes[pair]
                         aggregates[pair] = record
                         entry = dict(episode=episode, input_index=index, action_id=action_id,
                                      epsilon=epsilon, loss=loss, reward=score['reward'], severity=score['severity'],
                                      cached=cached, model_calls=self.jobs[job_id]['model_calls'])
                         stream.write(json.dumps(_public(entry, job_id), allow_nan=False)+'\n')
                         stream.flush()
+                        if episode % 10 == 0 or policy.updates == 1:
+                            self._policy_statistics(job_id, policy, context, aggregates.values())
                         with self.lock:
                             job = self.jobs[job_id]
                             job['history'] = (job['history']+[entry])[-self.HISTORY_LIMIT:]
@@ -367,6 +383,7 @@ class DiscoveryManager:
         finally:
             if policy is not None:
                 try:
+                    self._policy_statistics(job_id, policy, context, self.jobs[job_id]['records'])
                     policy.save(directory/'policy.pt')
                 except Exception as exc:
                     status, error = 'error', f'Could not save policy: {exc}'

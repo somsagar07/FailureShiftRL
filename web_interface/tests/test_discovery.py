@@ -21,6 +21,7 @@ class Analyses:
     def __init__(self):
         self.model_lock = threading.RLock()
         self.released = 0
+        self.node_requests = []
         self.context = dict(
             job={'id': EMBEDDING_ID, 'status': 'completed', 'preview_id': PREVIEW_ID},
             model={'source': 'huggingface', 'name': 'fixture/model', 'task': 'summarization'},
@@ -38,6 +39,11 @@ class Analyses:
 
     def release_encoder(self):
         self.released += 1
+
+    def discovery_node(self, identity, index, action, evaluator=None):
+        self.node_requests.append((identity, index, action))
+        return {'id': action, 'action': {'name': 'fixture'}, 'text': 'variant',
+                'position': [action / 10, 0, 0], 'similarity': .9, 'neighbors': []}
 
 
 class Evaluator:
@@ -113,9 +119,21 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(any(entry['cached'] for entry in result['history']))
         self.assertNotIn('probabilities', json.dumps(result))
         self.assertTrue(self.evaluators[0].closed)
-        self.assertEqual(self.embeddings.released, 1)
+        self.assertEqual(self.embeddings.released, 0,
+                         'Read-only discovery must retain reusable Analyze weights')
+        self.assertEqual(len(self.embeddings.node_requests), result['unique_evaluations'])
+        for record in result['records']:
+            self.assertEqual(record['node']['id'], record['action_id'])
+            self.assertEqual(record['node']['position'], [record['action_id'] / 10, 0, 0])
+        statistics = result['policy_statistics']
+        self.assertEqual(statistics['input_count'], 1)
+        self.assertEqual(statistics['policy_updates'], 25)
+        self.assertEqual({action['action_id'] for action in statistics['actions']}, {4, 9})
+        self.assertTrue(all(action['std'] is None for action in statistics['actions']))
+        self.assertTrue(all(action['evaluated_inputs'] == 1 for action in statistics['actions']))
         report = json.loads(manager.artifact(result['id'], 'report.json').read_text())
         self.assertEqual(report['records'], result['records'])
+        self.assertEqual(report['policy_statistics'], statistics)
         self.assertEqual(len(manager.artifact(result['id'], 'episodes.jsonl').read_text().splitlines()), 40)
         self.assertTrue(manager.artifact(result['id'], 'policy.pt').is_file())
         self.assertEqual(manager.list()[0]['id'], result['id'])
@@ -193,6 +211,31 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn(captured[0]['input'], ('good', 'bad'))
         self.assertEqual(result['loss'], .2)
         self.assertTrue(Path(result['checkpoint']).is_dir())
+        self.assertEqual(self.embeddings.released, 1,
+                         'Fine-tuning must invalidate retained inference weights')
+
+    def test_measured_graph_node_is_published_before_discovery_completes(self):
+        entered, release = threading.Event(), threading.Event()
+
+        class PausingEvaluator(Evaluator):
+            def predict(self, value, **kwargs):
+                if len(self.calls) == 2:
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError('test inference release timeout')
+                return super().predict(value, **kwargs)
+
+        manager = self.manager(PausingEvaluator())
+        job = manager.start(dict(embedding_id=EMBEDDING_ID, reference_summary='reference', episodes=40, seed=7))
+        try:
+            self.assertTrue(entered.wait(5))
+            live = manager.get(job['id'])
+            self.assertEqual(live['status'], 'running')
+            self.assertTrue(live['records'])
+            self.assertEqual(live['records'][0]['node']['id'], live['records'][0]['action_id'])
+        finally:
+            release.set()
+            self.wait(lambda: manager.get(job['id']))
 
     def test_queued_model_change_is_rejected_before_loading(self):
         manager = self.manager()

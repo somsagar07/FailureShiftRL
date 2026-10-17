@@ -55,6 +55,7 @@ class EmbeddingView {
     if (this.drag) this.endPointer({type: 'pointercancel', pointerId: this.drag.id});
     this.canvas.title = '';
     this.discovery=null;this.measured=new Map();this.severities=new Map();
+    this.actionStatistics=new Map();this.actionRadii=new Map();
     this.points = points;
     this.nodes = [];
     this.focusIndex = null;
@@ -74,7 +75,7 @@ class EmbeddingView {
   setExpansion(index, nodes) {
     if (index !== this.focusIndex) return;
     this.nodes = nodes;
-    this.selectedAction = null;
+    if (!nodes.some(node => node.id === this.selectedAction)) this.selectedAction = null;
     this.render();
   }
 
@@ -94,6 +95,19 @@ class EmbeddingView {
   setDiscovery(job) {
     this.discovery=job;
     this.measured=new Map();this.severities=new Map();
+    const statistics=job?.policy_statistics;
+    this.actionStatistics=new Map((statistics?.actions||[]).map(action=>[action.action_id,action]));
+    this.actionRadii=new Map();
+    if(statistics?.policy_updates>0&&statistics.input_count>1) {
+      const ranked=[...this.actionStatistics.values()].filter(action=>Number.isFinite(action.std)&&action.std>=0).sort((a,b)=>a.std-b.std);
+      for(let first=0;first<ranked.length;) {
+        let last=first;while(last+1<ranked.length&&ranked[last+1].std===ranked[first].std)last++;
+        // Average tied ranks; all-equal values get a neutral midpoint.
+        const rank=ranked.length>1?(first+last)/(2*(ranked.length-1)):.5;
+        for(let i=first;i<=last;i++)this.actionRadii.set(ranked[i].action_id,11-7*rank);
+        first=last+1;
+      }
+    }
     const groups=new Map();
     for(const record of job?.records||[]) {
       if(!Number.isFinite(record.severity))continue;
@@ -110,6 +124,16 @@ class EmbeddingView {
     if(!Number.isFinite(value))return '#9aa1a9';
     const severity=Math.max(0,Math.min(1,value));
     return `rgb(${Math.round(47+166*severity)},${Math.round(158-107*severity)},${Math.round(88-36*severity)})`;
+  }
+
+  policyHint(id) {
+    if(!this.discovery)return '';
+    const statistics=this.discovery.policy_statistics,action=this.actionStatistics.get(id),updated=statistics?.policy_updates>0;
+    const count=statistics?.input_count??'unknown';
+    const mean=updated&&Number.isFinite(action?.mean)?action.mean.toPrecision(3):'unavailable';
+    const reason=!statistics?'statistics unavailable':!updated?'no policy updates yet':statistics.input_count<2?'requires at least 2 original inputs':'not available';
+    const variation=this.actionRadii.has(id)?action.std.toPrecision(3):`unavailable (${reason})`;
+    return ` · mean DQN action preference: ${mean} · variation across ${count} original inputs (sample SD): ${variation} · tested inputs: ${action?.evaluated_inputs??'—'}/${count} · not calibrated failure confidence`;
   }
 
   reset() {clearTimeout(this.pulseTimer);this.setData([]);}
@@ -146,7 +170,7 @@ class EmbeddingView {
     this.canvas.focus({preventScroll: true});
     this.drag = {id: event.pointerId, x: event.clientX, y: event.clientY,
       startX: event.clientX, startY: event.clientY, moved: false,
-      pan: event.shiftKey || event.button === 2, point: this.pick(event)};
+      pan: event.shiftKey || event.button === 2, point: this.pick(event), focusIndex: this.focusIndex};
     this.canvas.title = '';
     try {this.canvas.setPointerCapture(event.pointerId);} catch (_) { /* Pointer may already have ended. */ }
   }
@@ -157,7 +181,7 @@ class EmbeddingView {
       const point = this.pick(event);
       this.canvas.style.cursor = point ? 'pointer' : 'grab';
       this.canvas.title = !point ? '' : point.kind === 'sample' ? point.data.name :
-        `${Object.entries(point.data.action).map(([key, value]) => `${key}: ${value}`).join(', ')} · cosine similarity: ${point.data.similarity.toFixed(3)}`;
+        `${Object.entries(point.data.action).map(([key, value]) => `${key}: ${value}`).join(', ')} · cosine similarity: ${point.data.similarity.toFixed(3)}${this.policyHint(point.data.id)}`;
       return;
     }
     if (drag.id !== event.pointerId) return;
@@ -185,7 +209,10 @@ class EmbeddingView {
     if (event.type !== 'pointerup' || drag.moved || drag.pan ||
         Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 4) return;
     const point = this.pick(event);
-    if (!point || point.data !== drag.point?.data || point.kind !== drag.point.kind) return;
+    if (!point || point.kind !== drag.point?.kind) return;
+    // Polling replaces JSON objects, but the same input/action is still a click.
+    if (point.kind === 'sample' ? point.data.index !== drag.point.data.index :
+        this.focusIndex !== drag.focusIndex || point.data.id !== drag.point.data.id) return;
     if (point.kind === 'sample') {
       this.focus(point.data.index);
       this.onSelectSample?.(point.data);
@@ -259,7 +286,8 @@ class EmbeddingView {
     const focal = this.height / (2 * Math.tan(Math.PI / 8));
     const focused = kind === 'sample' && data.index === this.focusIndex;
     const selected = kind === 'action' ? data.id === this.selectedAction : focused && this.selectedAction === null;
-    const radius = Math.max(2, Math.min(18, (selected ? 8 : focused ? 7 : kind === 'action' ? 6 : 5) * this.fitDistance / depth));
+    const baseRadius=kind==='action'&&this.discovery?(this.actionRadii.get(data.id)??3.5):(selected ? 8 : focused ? 7 : kind === 'action' ? 6 : 5);
+    const radius = Math.max(2, Math.min(18, baseRadius * this.fitDistance / depth));
     return {data, kind, depth, selected, focused, radius,
       x: this.width / 2 + this.pan.x + x * focal / depth,
       y: this.height / 2 + this.pan.y - y * focal / depth};
@@ -296,7 +324,9 @@ class EmbeddingView {
       // A light rim separates overlapping points; selection gets a darker border.
       ctx.strokeStyle = node.selected ? '#202a35' : '#ffffff';
       ctx.lineWidth = node.selected ? 2.5 : 1.5;
+      ctx.setLineDash(this.discovery&&node.kind==='action'&&!this.actionRadii.has(node.data.id)?[2,2]:[]);
       ctx.stroke();
+      ctx.setLineDash([]);
       const current=this.discovery?.current;
       const active=this.discovery&&['queued','running'].includes(this.discovery.status)&&current&&
         (node.kind==='sample'?node.data.index===current.input_index:this.focusIndex===current.input_index&&node.data.id===current.action_id);

@@ -111,6 +111,23 @@ test('measured outcomes use readable predictions, summaries, generated images an
   assert.match(content(get('discovery-output')),/CLIP prompt alignment: 0.370.*Prompt: A scientist.*Noise seed: 42/);
 });
 
+test('policy inspector exposes mean, variation and tested-input coverage for measured and unvisited actions',async()=>{
+  const f=setup(),{controller:c,get,responses}=f;f.ready();
+  const statistics={method:'softmax_q_across_original_inputs',temperature:1,input_count:4,policy_updates:10,std_ddof:1,actions:[
+    {action_id:4,mean:.6,std:.02,evaluated_inputs:3},{action_id:9,mean:.2,std:.08,evaluated_inputs:0}
+  ]};
+  responses.push(job({status:'completed',policy_statistics:statistics}));await c.start();
+  assert.match(content(get('discovery-components')),/Mean DQN action preference 0\.600/);
+  assert.match(content(get('discovery-components')),/Preference variation.*sample SD.*0\.0200/);
+  assert.match(content(get('discovery-components')),/Original inputs.*4/);assert.match(content(get('discovery-components')),/Tested inputs.*3 \/ 4/);
+  c.inspectPair(0,9);assert.match(content(get('discovery-components')),/not been evaluated/);
+  assert.match(content(get('discovery-components')),/Mean DQN action preference 0\.200/);assert.match(content(get('discovery-components')),/Tested inputs.*0 \/ 4/);
+  c.receive('discoveries',job({status:'completed',policy_statistics:{...statistics,input_count:1,actions:[{action_id:9,mean:.2,std:null,evaluated_inputs:1}]}}),c.version);
+  assert.match(content(get('discovery-components')),/unavailable.*at least 2 original inputs/i,'one input never reports zero cross-input variation');
+  c.receive('discoveries',job({status:'running',policy_statistics:{...statistics,policy_updates:0,actions:[]}}),c.version);
+  assert.match(content(get('discovery-components')),/unavailable.*no policy updates/i,'an untrained policy is not presented as confident');
+});
+
 test('task training-rate defaults preserve edits, summary references validate locally and classification hides unused threshold',async()=>{
   const f=setup(),{controller:c,get,explorer,calls}=f;f.ready();
   assert.equal(get('finetune-lr').value,'0.001');assert.equal(get('discovery-threshold-field').hidden,true);

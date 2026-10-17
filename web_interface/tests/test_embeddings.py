@@ -221,6 +221,23 @@ class EmbeddingTests(unittest.TestCase):
         self.assertEqual(reloaded['model']['name'], 'fixture/vision')
         self.assertGreater(sum(len(encoder.seen) for encoder in self.encoders), count + 2)
 
+    def test_discovery_node_embeds_only_the_visited_action_in_the_existing_pca(self):
+        preview = self.preview(colors=('red', 'lime', 'blue'))
+        job = self.overview(preview)
+        action_id = preview['nodes'][0]['id']
+        count = len(self.encoders[0].seen)
+        node = self.manager.discovery_node(job['id'], 1, action_id)
+        self.assertEqual(len(self.encoders[0].seen), count + 1)
+        self.assertEqual(node, self.manager.discovery_node(job['id'], 1, action_id))
+        self.assertEqual(len(self.encoders[0].seen), count + 1)
+        ordinary = next(entry for entry in self.expansion(job, 1)['nodes'] if entry['id'] == action_id)
+        # BLAS uses different reductions for a single vector and a batch.
+        np.testing.assert_allclose(node['position'], ordinary['position'], rtol=0, atol=1e-14)
+        self.assertEqual({key: value for key, value in node.items() if key != 'position'},
+                         {key: value for key, value in ordinary.items() if key != 'position'})
+        with self.assertRaises(ValueError):
+            self.manager.discovery_node(job['id'], 1, 'missing-action')
+
     def test_invalid_embeddings_fail_without_fabricated_points(self):
         for bad in (np.array([[0., 0.], [0., 0.]]),
                     np.array([[1., np.nan], [1., 2.]]),

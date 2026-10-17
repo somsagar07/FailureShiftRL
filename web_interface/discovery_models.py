@@ -43,9 +43,11 @@ class Evaluator:
         self.threshold=unit(config.get('failure_threshold',.15),'failure_threshold')
 
     def close(self):
-        for name in ('model','pipeline','encoder','scorer','nli'):
+        for name in ('model','pipeline','encoder','scorer','nli','processor','tokenizer'):
             if hasattr(self,name):
                 delattr(self,name)
+        if getattr(self,'_shared_resources',False):
+            return
         gc.collect()
         if hasattr(self,'torch') and self.torch.cuda.is_available():
             self.torch.cuda.empty_cache()
@@ -59,11 +61,14 @@ class ClassificationEvaluator(Evaluator):
     criterion='labelled classification error or original-prediction consistency candidate'
     limitations='Unlabelled inputs measure prediction consistency, not verified errors.'
 
-    def __init__(self,model,config,directory):
+    def __init__(self,model,config,directory,*,encoder=None,shared=None):
         super().__init__(config,directory)
         selection=_selection(model,'classification')
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
+        if shared is not None:
+            self.model,self.processor,self.revision=shared.model,shared.processor,shared.revision
+            return
         try:
             cfg=transformers.AutoConfig.from_pretrained(selection['name'],**_options(selection))
             if cfg.num_labels<2 or getattr(cfg,'problem_type',None) not in (None,'single_label_classification'):
@@ -201,7 +206,7 @@ class GroundedScorer:
 class SummarizationEvaluator(Evaluator):
     limitations='ROUGE measures reference overlap; NLI estimates source support. Both are automated review signals.'
 
-    def __init__(self,model,config,directory):
+    def __init__(self,model,config,directory,*,encoder=None,shared=None):
         super().__init__(config,directory)
         self.metric=config.get('summary_metric','reference')
         if self.metric not in ('reference','grounded'):
@@ -212,7 +217,7 @@ class SummarizationEvaluator(Evaluator):
             raise ValueError('Summary evaluation requires an explicit reference summary.')
         if self.metric=='grounded' and (not isinstance(self.source,str) or not self.source.strip()):
             raise ValueError('Grounded summary scoring needs original source text.')
-        self.encoder=SummarizationEncoder(model)
+        self.encoder=shared.encoder if shared is not None else encoder or SummarizationEncoder(model)
         self.model,self.tokenizer,self.torch=self.encoder.model,self.encoder.tokenizer,self.encoder.torch
         self.revision=self.encoder.revision
         self.device=_device(self.torch,config)
@@ -222,7 +227,7 @@ class SummarizationEvaluator(Evaluator):
             raise ValueError('max_new_tokens must be an integer from 1 to 512.')
         self.criterion='reference ROUGE-L review signal' if self.metric=='reference' else 'reference ROUGE-L and grounded NLI review signal'
         if self.metric=='grounded':
-            self.nli=GroundedScorer(config.get('_nli_model',{'source':'huggingface','name':'cross-encoder/nli-MiniLM2-L6-H768'}),self.device)
+            self.nli=shared.nli if shared is not None else GroundedScorer(config.get('_nli_model',{'source':'huggingface','name':'cross-encoder/nli-MiniLM2-L6-H768'}),self.device)
 
     def measure_summary(self,text,source=None):
         overlap,repetition=rouge_l(self.reference,text),nonrepetition(text)
@@ -267,12 +272,12 @@ class SummarizationEvaluator(Evaluator):
         return result
 
 
-def load_diffusion(model):
+def load_diffusion(model,*,encoder=None):
     try:
         import diffusers
     except ImportError as exc:
         raise ValueError('Generation needs diffusers, accelerate and peft. Run bash setup.sh.') from exc
-    encoder=DiffusionPromptEncoder(model)
+    encoder=encoder or DiffusionPromptEncoder(model)
     selection=_selection(model,'generation')
     options=_options(selection,encoder.revision)
     options.pop('trust_remote_code',None)
@@ -314,11 +319,15 @@ class GenerationEvaluator(Evaluator):
     criterion='CLIP prompt alignment review signal'
     limitations='CLIP similarity estimates prompt alignment, not demographic bias, image fidelity or safety.'
 
-    def __init__(self,model,config,directory):
+    def __init__(self,model,config,directory,*,encoder=None,shared=None):
         super().__init__(config,directory)
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
-        self.pipeline,self.revision=load_diffusion(model)
+        self.encoder=shared.encoder if shared is not None else encoder or DiffusionPromptEncoder(model)
+        if shared is not None:
+            self.pipeline,self.revision=shared.pipeline,shared.revision
+        else:
+            self.pipeline,self.revision=load_diffusion(model,encoder=self.encoder)
         self.pipeline.to(self.device)
         self.pipeline.set_progress_bar_config(disable=True)
         self.steps=config.get('generation_steps',12)
@@ -327,6 +336,11 @@ class GenerationEvaluator(Evaluator):
             raise ValueError('generation_steps must be an integer from 1 to 100.')
         if isinstance(self.size,bool) or not isinstance(self.size,int) or not 32<=self.size<=1024 or self.size%8:
             raise ValueError('generation_size must be a multiple of 8 from 32 to 1024.')
+        self.min_clip_similarity=.25
+        if shared is not None:
+            self.scorer,self.processor=shared.scorer,shared.processor
+            self.scorer_identity=copy.deepcopy(shared.scorer_identity)
+            return
         selection=_selection(config.get('_clip_model',{'source':'huggingface','name':'openai/clip-vit-base-patch32'}),'classification')
         cfg=transformers.AutoConfig.from_pretrained(selection['name'],**_options(selection))
         revision=_resolved_revision(selection,getattr(cfg,'_commit_hash',None))
@@ -335,7 +349,6 @@ class GenerationEvaluator(Evaluator):
         self.scorer=_pretrained(loaded,info,self.torch).to(self.device)
         self.processor=transformers.CLIPProcessor.from_pretrained(selection['name'],use_fast=False,**options)
         self.scorer_identity={'name':selection['name'],'revision':revision}
-        self.min_clip_similarity=.25
 
     def predict(self,value,*,seed=0,artifact_name='sample'):
         if not isinstance(value,str) or not value.strip():
@@ -376,12 +389,12 @@ class GenerationEvaluator(Evaluator):
                 'seed_policy':'same baseline and variant noise seed per original input'}
 
 
-def create_evaluator(model,config,directory,progress=None):
+def create_evaluator(model,config,directory,progress=None,*,encoder=None,shared=None):
     task=config.get('task',model.get('task','classification'))
     config={**config,'task':task}
     adapter={'classification':ClassificationEvaluator,'summarization':SummarizationEvaluator,'generation':GenerationEvaluator}.get(task)
     if adapter is None:
         raise ValueError('Unsupported evaluation task.')
     if progress:
-        progress(phase='loading evaluation model')
-    return adapter(model,config,directory)
+        progress(phase='reusing loaded evaluation model' if shared is not None else 'loading evaluation model')
+    return adapter(model,config,directory,encoder=encoder,shared=shared)
