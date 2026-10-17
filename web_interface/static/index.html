@@ -37,10 +37,8 @@
             <label for="model-name" id="model-label">Local model directory</label>
             <input id="model-name" type="text" placeholder="/path/to/saved-huggingface-model" autocomplete="off">
           </div>
-          <p id="model-help" class="hint">The selected vision model runs locally on the chosen device.</p>
+          <p id="model-help" class="hint">Runs locally · downloads on first use.</p>
           <p id="model-status" class="hint" aria-live="polite"></p>
-          <label for="analysis-device">Analyze device</label>
-          <select id="analysis-device"><option value="auto">Automatic (CUDA when available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
 
           <h2>Input</h2>
           <div id="image-fields">
@@ -85,6 +83,8 @@
           <div id="action-editor"></div>
           <button type="button" id="reset-actions">Restore all actions</button>
           <p id="action-error" class="error" role="alert" hidden></p>
+          <label for="analysis-device">Analyze device</label>
+          <select id="analysis-device"><option value="auto">Automatic (CUDA when available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
         </fieldset>
         <p id="form-error" class="error" role="alert" hidden></p>
         <button id="generate" class="primary" type="submit" disabled>Analyze</button>
