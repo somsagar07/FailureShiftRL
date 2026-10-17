@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>failureshiftRL</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/graph.js" defer></script>
+  <script src="/embedding-view.js" defer></script>
+  <script src="/embedding-controller.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside>
+    <div class="name">failureshiftRL</div>
+    <h2>Workspace</h2>
+    <nav aria-label="Workspace domains">
+      <button type="button" class="domain active" data-task="classification">Image classification</button>
+      <button type="button" class="domain" data-task="summarization">Summarization</button>
+      <button type="button" class="domain" data-task="generation">Image generation</button>
+    </nav>
+  </aside>
+  <main>
+    <h1 id="domain-title">Image classification</h1>
+    <p id="workspace-description" class="hint">Explore model embeddings. Select an image to see how actions change it.</p>
+    <div class="layout">
+      <form id="preview-form">
+        <fieldset id="config-fields">
+          <label for="model-source">Model source</label>
+          <select id="model-source"><option value="local">Local model</option><option value="huggingface" selected>Hugging Face</option></select>
+          <div id="hf-model-fields" hidden>
+            <label for="model-preset">Hugging Face model</label>
+            <select id="model-preset"></select>
+          </div>
+          <div id="model-name-fields">
+            <label for="model-name" id="model-label">Local model directory</label>
+            <input id="model-name" type="text" placeholder="/path/to/saved-huggingface-model" autocomplete="off">
+          </div>
+          <p id="model-help" class="hint">The selected vision model runs locally on CPU.</p>
+          <p id="model-status" class="hint" aria-live="polite"></p>
+
+          <h2>Input</h2>
+          <div id="image-fields">
+            <label for="dataset-source">Data source</label>
+            <select id="dataset-source"><option value="folder">Local folder</option><option value="huggingface">Hugging Face dataset</option></select>
+            <div id="folder-fields">
+              <label for="folder-path">Folder path</label>
+              <input id="folder-path" type="text" placeholder="/path/to/your/images">
+              <p class="hint">Includes images in class subfolders.</p>
+              <button type="button" id="browse-folder">Choose folder…</button>
+              <input id="folder-files" type="file" webkitdirectory multiple hidden>
+            </div>
+            <div id="hf-dataset-fields" hidden>
+              <label for="dataset-preset">Hugging Face dataset</label>
+              <select id="dataset-preset"></select>
+              <p class="hint">Presets fill in the settings below. Downloads start when you load input data.</p>
+              <div id="dataset-name-fields" hidden>
+                <label for="dataset-name">Dataset ID</label>
+                <input id="dataset-name" type="text" placeholder="owner/image-dataset">
+              </div>
+              <label for="dataset-split">Split</label>
+              <input id="dataset-split" type="text" value="train" placeholder="train or train[:100]">
+              <details class="dataset-options"><summary>Dataset options</summary>
+                <label for="dataset-config">Configuration (optional)</label>
+                <input id="dataset-config" type="text" placeholder="Dataset's default configuration">
+                <label for="dataset-column">Image column (optional)</label>
+                <input id="dataset-column" type="text" placeholder="Detect automatically">
+              </details>
+            </div>
+            <button type="button" id="load-dataset">Load input data</button>
+            <p id="dataset-status" class="hint" aria-live="polite">Select a folder or dataset containing your images.</p>
+            <p id="dataset-summary" class="hint"></p>
+          </div>
+          <div id="text-fields" hidden>
+            <label for="source-text" id="source-label">Text</label>
+            <textarea id="source-text" rows="7" maxlength="20000"></textarea>
+            <p id="source-help" class="hint"></p>
+          </div>
+
+          <h2>Action space <span id="action-count" class="hint">125 combinations</span></h2>
+          <p id="action-help" class="hint" hidden></p>
+          <div id="action-editor"></div>
+          <button type="button" id="reset-actions">Restore all actions</button>
+          <p id="action-error" class="error" role="alert" hidden></p>
+        </fieldset>
+        <p id="form-error" class="error" role="alert" hidden></p>
+        <button id="generate" class="primary" type="submit" disabled>Analyze</button>
+      </form>
+
+      <section class="viewer" aria-label="Input combinations">
+        <h2 id="viewer-title">Embedding space</h2>
+        <div id="input-browser" hidden>
+          <label for="image-select">Dataset image</label><select id="image-select"></select>
+          <div class="image-pagination"><button type="button" id="previous-images">Previous images</button><span id="image-page" class="hint"></span><button type="button" id="next-images">Next images</button></div>
+        </div>
+        <p id="preview-status" class="hint" aria-live="polite">Click Analyze to explore model embeddings and action combinations.</p>
+        <div class="graph-layout">
+        <div id="embedding-wrap" class="embedding-wrap" hidden>
+          <div class="embedding-toolbar">
+            <span class="embedding-legend"><i class="sample-dot"></i>Inputs <i class="action-dot"></i>Actions</span>
+            <div class="embedding-buttons">
+              <button id="embedding-back" type="button" disabled>All inputs</button>
+              <button id="embedding-zoom-out" type="button" aria-label="Zoom out in 3D">−</button>
+              <button id="embedding-zoom-in" type="button" aria-label="Zoom in 3D">+</button>
+              <button id="embedding-fit" type="button">Fit</button>
+              <button id="find-failure" type="button" disabled title="Failure discovery will be added later.">Find failure</button>
+            </div>
+          </div>
+          <canvas id="embedding-canvas" tabindex="0" role="group" aria-label="3D model embedding graph. Drag to rotate, Shift-drag to pan, scroll to zoom. Select inputs and actions using the dropdowns or by clicking points. Arrow keys rotate, plus and minus zoom, zero fits, Escape shows all inputs."></canvas>
+          <div class="embedding-footer">
+            <p id="embedding-focus" aria-live="polite"></p>
+            <div id="embedding-actions" hidden>
+              <label for="embedding-action">Preview</label>
+              <select id="embedding-action"></select>
+            </div>
+            <p id="embedding-meta" class="hint"></p>
+            <p class="hint embedding-help">Drag to rotate · Shift-drag to pan · scroll to zoom · click a point to explore</p>
+          </div>
+        </div>
+        <div id="graph-wrap" class="graph-wrap" hidden>
+          <div class="graph-toolbar">
+            <input id="graph-search" type="search" aria-label="Find a combination" placeholder="Find a number or action…">
+            <button id="graph-zoom-out" type="button" aria-label="Zoom out">−</button>
+            <span id="graph-zoom" class="hint">100%</span>
+            <button id="graph-zoom-in" type="button" aria-label="Zoom in">+</button>
+            <button id="graph-fit" type="button">Fit</button>
+          </div>
+          <div id="graph-grouping" class="graph-grouping">
+            <label for="graph-group-by">Group by</label>
+            <select id="graph-group-by"></select>
+          </div>
+          <p id="graph-space" class="hint"></p>
+          <div id="graph-legend" class="graph-legend" aria-label="Combination groups"></div>
+          <svg id="graph" role="group" tabindex="0" preserveAspectRatio="xMidYMid meet" aria-label="Input combination graph. Drag background to pan, drag nodes to move them, click a node to inspect its sample. Scroll to zoom, or use arrow keys and plus/minus. Press 0 to fit."></svg>
+          <p id="graph-count" class="hint" aria-live="polite"></p>
+          <p class="hint graph-help">Drag background to pan · drag nodes to move · scroll to zoom · click to view a sample</p>
+        </div>
+        <div id="details" hidden>
+          <div class="input-pair">
+            <section><h3>Original input</h3><div id="original-view"></div></section>
+            <section><h3 id="selected-title">Selected combination</h3><div id="selected-view"></div></section>
+          </div>
+          <p id="selected-action"></p>
+          <p id="embedding-similarity" class="hint" hidden></p>
+        </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

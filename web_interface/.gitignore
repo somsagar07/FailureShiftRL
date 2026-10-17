@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+runs/
+*.log
+# Local development notes, separate from the app documentation.
+/PLAN.md
+/PROGRESS.md
+/EMBEDDING_PLAN.md
+/DOMAIN_EMBEDDING_PLAN.md

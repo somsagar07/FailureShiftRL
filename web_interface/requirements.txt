@@ -1,0 +1,10 @@
+# Local model embeddings, input previews, and Hugging Face datasets/models.
+Pillow>=10,<13
+huggingface_hub>=0.34,<1
+datasets>=3,<5
+numpy>=1.26,<3
+torch>=2.6,<3
+transformers>=4.55,<5
+sentencepiece>=0.2,<0.3
+protobuf>=4.25,<7
+ftfy>=6.2,<7
