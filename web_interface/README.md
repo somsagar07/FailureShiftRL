@@ -1,24 +1,26 @@
 # failureshiftRL
 
 A local workspace for image classification, summarization, and image generation.
-**Analyze** displays selected-model embeddings in 3D. **Find failure** starts a
-bounded DQN search, evaluates actual model outputs, and colors measured regions
+**Analyze** displays the selected model's embeddings in 3D. **Find failure** runs a
+DQN search, evaluates model outputs, and colors measured regions
 of the graph. Review examples and supply desired targets to fine-tune a separate
 model checkpoint.
 
 ## Run
 
+From the repository root:
+
 ```bash
-cd ~/Desktop/ml_failure/FailureShiftRL/web_interface
+cd web_interface
 bash run.sh
 ```
 
 The launcher creates its own `.venv` and installs missing requirements before
 starting the server. First setup needs internet access to PyPI and the official
 PyTorch wheel index. Setup detects NVIDIA hardware and selects a compatible CUDA
-build; computers without it use CPU. It checks the required imports, then opens a browser on this computer.
-Keep the terminal open. Press
-Ctrl+C to stop. After code changes, stop and restart the server, then refresh the
+build; computers without it use CPU. It checks the required imports, then opens
+a browser on this computer. Keep the terminal open. Press Ctrl+C to stop.
+After code changes, stop and restart the server, then refresh the
 browser. If port 8000 is occupied, use `bash run.sh --port 8001`.
 If the browser does not open automatically, visit `http://127.0.0.1:8000`.
 
@@ -45,17 +47,17 @@ Image generation and fine-tuning can take substantially longer than analysis on 
 
 ### Over SSH
 
-On the server:
+From the repository root on the server:
 
 ```bash
-cd ~/Desktop/ml_failure/FailureShiftRL/web_interface
+cd web_interface
 .venv/bin/python -E server.py --port 8000
 ```
 
-On your laptop, keep a second terminal open:
+On your laptop, keep a second terminal open. Replace `USER@SERVER` with your SSH login:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 ssagar6@en4228255l
+ssh -N -L 8000:127.0.0.1:8000 USER@SERVER
 ```
 
 Open `http://127.0.0.1:8000` on your laptop. Match the local and remote port if
@@ -74,8 +76,9 @@ only on the server's loopback interface.
    remove it; its values dropdown becomes disabled. Each selected action can use
    all fixed values or one value. Other domains offer their own fixed action choices.
 5. Choose an **Analyze device**: **Automatic** uses CUDA when available, and
-   **CPU** or **CUDA GPU** selects it explicitly. Click **Analyze**. For classification, once the original embeddings finish,
-   click a point to dim the other images and compute that image's action combinations.
+   **CPU** or **CUDA GPU** selects it explicitly. Click **Analyze**. For classification,
+   once the original embeddings finish, click a point to dim the other images and
+   compute that image's action combinations.
    Click an action point to inspect the transformed image.
 6. For summarization and generation, the single input and its action variants are
    analyzed together. Its action graph expands automatically. Click a point or use
@@ -91,8 +94,7 @@ For a short classification demo, choose **Hugging Face → MobileNetV2** and
 **Hugging Face dataset → Cats and dogs**, click **Load input data**, then
 **Analyze**. The overview has one point per image. Selecting one image expands
 its 125 action nodes when all actions are enabled.
-Presets are saved choices, not bundled weights or datasets: first use needs a
-download, and later runs reuse the Hugging Face cache.
+Presets download weights and datasets on first use. Later runs reuse the Hugging Face cache.
 
 Model presets follow the selected domain:
 
@@ -136,15 +138,14 @@ can limit the selected rows, but may still download the underlying dataset files
 The image selector lists 100 images at a time with previous/next controls.
 
 For classification, **Analyze** downloads the selected model's needed files,
-loads its image processor and weights, and extracts features on the selected device. Progress
-appears above the viewer. Existing Hugging Face files are reused; gated/private
+loads its image processor and weights, and extracts features on the selected device.
+Progress appears above the viewer. Existing Hugging Face files are reused; gated/private
 models need your normal Hugging Face authentication.
 
 The image adapter supports compatible Transformers vision `AutoModel` checkpoints,
 including the two presets. A local model must be a `save_pretrained` directory with
 `config.json`, `preprocessor_config.json`, and weights; arbitrary `.pt` files are not
-supported. Custom repository code is disabled. Unsupported models report an error;
-the app never substitutes another model or generates placeholder embeddings.
+supported. Custom repository code is disabled. Unsupported models report an error.
 Discovery additionally requires a pretrained single-label classification head with
 at least two classes. Regression and multilabel heads are explicitly unsupported.
 
@@ -157,18 +158,17 @@ token limit produce a clear error instead of being silently truncated.
 Image generation accepts **Stable Diffusion 1/2 pipelines** in Diffusers directory
 format with `model_index.json`, `text_encoder/`, and `tokenizer/`. The two presets
 use this format. Only the selected pipeline's CLIP text encoder and tokenizer are
-loaded/downloaded during Analyze; its UNet and VAE are unnecessary for this prompt view. SDXL,
-FLUX, single-file checkpoints, and custom-code pipelines are not supported by this
-adapter. An incompatible selection reports an error without substituting another
-model. Discovery accepts standard safetensors or `.bin` component weights,
-preferring safetensors when both exist; `.bin` files use weights-only loading.
+loaded/downloaded during Analyze. SDXL, FLUX, single-file checkpoints, and custom-code
+pipelines are unsupported. Discovery loads the UNet and VAE and accepts standard
+safetensors or `.bin` component weights, preferring safetensors when both exist.
+`.bin` files use weights-only loading.
 Prompt length is checked against the encoder's token limit.
 
 The running server retains one active model family and its evaluation scorers.
 Repeated discovery runs reuse loaded weights while creating fresh per-run scoring
 settings, seeds, output paths, and measurements. Summarization and generation
-reuse the encoder already loaded by Analyze when the devices match; classification loads its pretrained
-head on the first discovery and shares the compatible base model afterward.
+reuse the encoder already loaded by Analyze when the devices match. Classification
+loads its pretrained head on the first discovery and shares the base model afterward.
 Switching model families evicts the previous evaluation resources, and fine-tuning
 clears the inference cache before loading trainable weights. Local checkpoint
 changes invalidate reuse. Keeping the server running avoids repeated weight loads;
@@ -206,8 +206,8 @@ wall-clock seconds for **Files / download**, **Weight loading**, **Embeddings**,
 and **PCA**. File preparation includes Hub metadata, local cache lookup and any
 downloads; it is not a network-only measurement. Total includes remaining input
 and result preparation; time waiting behind another model job is shown separately.
-Reused stages are marked and take zero new compute time. The timings describe this
-analysis, rather than promising a fixed speedup for every model.
+Reused stages are marked and take zero new compute time. Timings depend on the
+selected model, inputs, and hardware.
 
 Measured on the RTX 4090 with PyTorch 2.11.0 (CUDA 12.8), using fresh model objects
 and already-downloaded weights (median of three runs per device):
@@ -306,9 +306,8 @@ realization, start a new run with a different seed.
 | Summarization | Reference ROUGE-L overlap, repetition, and optionally NLI source support | Automated quality signals; not a proof of factual correctness. |
 | Generation | Independent CLIP similarity between the actual generated image and its prompt, plus degradation from the baseline | Prompt-alignment candidates; not demographic bias or aesthetic quality. |
 
-All rewards and plotted severities are bounded to `[0,1]`, but the scales mean
-different things across tasks and should not be compared as calibrated probabilities.
-These are practical starting criteria, not a claim of an optimal universal reward.
+Rewards and plotted severities lie in `[0,1]`. Their scales differ across tasks
+and do not represent calibrated failure probabilities.
 
 **Classification.** Supply optional JSON labels indexed by input position, for
 example `{"0": 281, "1": "goldfish, Carassius auratus"}`. IDs and exact names must
@@ -357,12 +356,11 @@ Add or remove reviewed examples, set epochs and learning rate, and press **Start
 fine-tuning**. Classification updates only the existing classifier head. Summarization
 trains the encoder-decoder on reviewed text/summary pairs. Generation trains UNet
 LoRA, saves the adapter, and saves a fused standalone pipeline that can be selected
-as a local model. The original model directory is unchanged. This first version
-trains on CPU; keep generation datasets and epoch budgets small for an initial test.
+as a local model. The original model directory is unchanged. Fine-tuning currently
+runs on CPU; use a small generation dataset and epoch budget for an initial test.
 
-Progress and loss are real optimization steps. These are training measurements,
-not held-out evidence of improvement. Use **Select checkpoint for Analyze** and
-evaluate on separate inputs before claiming that failures have been reduced.
+Progress and loss describe the training examples. Use **Select checkpoint for Analyze**
+and evaluate on separate inputs to check whether failures have been reduced.
 
 ## Jobs and saved outputs
 
@@ -425,9 +423,9 @@ Use a smaller dataset split or a smaller feature model if needed.
 | Image generation | 27: 3 descriptions × 3 professions × 3 settings | A filled prompt; discovery adds generated images |
 
 Classification values and generation choices match the repository's experiment
-configurations. The current interface only removes or restores these values; adding
-new values/types is intentionally disabled. Turning a classification transformation
-off leaves that property unchanged. Every combination starts from the original
+configurations. The interface supports removing and restoring fixed values.
+Turning a classification transformation off leaves that property unchanged.
+Every combination starts from the original
 input. Images are resized to 224 × 224, matching the experiment, and transformations
 are applied in the order rotation → saturation → darkening.
 
@@ -444,9 +442,7 @@ PNG previews are rendered and cached when viewed or embedded.
 
 Preview images and configuration are saved under `runs/previews/`; uploaded input
 images are under `runs/datasets/`, and embedding arrays are under `runs/embeddings/`.
-All are excluded from Git. After a server restart,
-load your input and click Analyze again. The original research scripts
-and source images are untouched.
+All are excluded from Git. After a server restart, load your input and click Analyze again.
 
 ## Checks
 
@@ -456,38 +452,15 @@ node tests/test_ui.cjs
 node tests/test_embedding_view.cjs
 node tests/test_embedding_controller.cjs
 node tests/test_discovery_controller.cjs
+node tests/test_embedding_live.cjs
 ```
 
-The Python tests check combination counts, real image transformations, folder
-loading/uploads, dataset/model boundaries, and HTTP handlers without a listening
-socket. JavaScript tests check model/dataset selection, action controls, the
-embedding workflow and image/text inspector, and legacy SVG graph interactions.
+The Python suite covers data loading, transformations, model adapters, CPU/CUDA
+execution, PCA, DQN learning, cancellation, saved reports, and fine-tuning. Model
+tests use small local checkpoints. JavaScript tests cover form controls, graph
+interaction, live updates, and responses arriving after the user changes inputs.
 
-Embedding tests use real image transformations and NumPy with a deterministic
-encoder at the model boundary, checking a shared PCA basis, full-space cosine,
-caching and cancellation. Renderer/controller tests exercise camera behavior,
-dimming, picking, expansion ordering and stale-response handling.
-
-Text-domain tests cover the shared baseline/variant PCA, full-space similarity,
-unchanged edits, task/model cache identities, and the HTTP flow. Adapter tests use
-small locally saved Transformers models to check the actual encoder interfaces,
-padding, prefixes, input limits, and incompatible checkpoints without downloads.
-
-CPU smoke tests with cached pretrained DistilBART and T5-base completed all 14
-text edits, producing 1024D and 768D features respectively. A cached pretrained
-MobileNetV2 smoke test covered four images and all 125 variants of one image.
-The discovery pipeline has also completed real cached MobileNetV2 and DistilBART
-runs, including policy updates, actual output scores and saved reports. A short
-DistilBART generation check verifies that checkpoint defaults do not conflict with
-the output budget. Summary discovery uses deterministic greedy decoding with
-bounded output length, independent of conflicting checkpoint generation defaults.
-
-New tests exercise state-dependent DQN learning, cancellation and failure cleanup,
-measured-only graph colors, stale response isolation, reviewed targets, actual
-tiny classifier/seq2seq optimization and reload, NLI scoring, real tiny SD/CLIP
-inference, and LoRA updates saved as a reloadable pipeline. Production diffusion,
-CLIP and NLI downloads have not been exercised in this sandbox.
-
-Native browser rendering and fresh Hugging Face network downloads remain
-unverified in the development sandbox. Run the environment check above before a
-demo; first-use downloads require network access from the machine running the app.
+Chrome checks on the RTX 4090 completed Analyze and discovery with pretrained
+MobileNetV2, DistilBART, and Tiny Stable Diffusion with an independent CLIP scorer.
+First-use model downloads and offline cache reuse were also checked. The production
+NLI scorer download remains untested; its adapter is covered with a local test model.

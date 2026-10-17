@@ -14,6 +14,7 @@ This project is organized into several key directories:
 - `Dataset/`: Contains dataset used in generative tasks. This folder will also be used to download and store the classification dataset.
 - `Experiments/`: Contains code for training RL agent, evaluating RL agent, and finetuning *Network Under Test* (NUT) for each task. It also contains code for additional experiments performed.
 - `Utils/`: Contains code to download and prepare classification dataset and other plotting functions.
+- `web_interface/`: Local browser interface for model analysis, failure discovery, and fine-tuning. See the [setup and usage instructions](web_interface/README.md).
 
 ## Getting Started
 These instructions will get your copy of the project up and running on your local machine for development and testing purposes.
