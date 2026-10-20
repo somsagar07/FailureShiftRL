@@ -1,5 +1,7 @@
 # Local analysis, DQN discovery, and reviewed model fine-tuning.
 Pillow>=10,<13
+# HTTPS trust-store fix for GHSA-6q48-6c7w-9gw2.
+certifi>=2026.10.19
 huggingface_hub>=0.34,<1
 datasets>=3,<5
 numpy>=1.26,<3
