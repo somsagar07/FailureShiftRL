@@ -1,4 +1,6 @@
 .venv/
+.vev-runtime/
+.vev-runtime-build-*/
 __pycache__/
 *.py[cod]
 .pytest_cache/

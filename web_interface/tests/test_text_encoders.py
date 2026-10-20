@@ -203,6 +203,24 @@ class TextEncoderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r'13.*12|12.*13'):
             encoder.encode(['a cat', ' '.join(['cat']*11)])
 
+    def test_summary_dataset_truncation_bounds_padded_model_inputs_and_preserves_prefix(self):
+        encoder = text_encoders.SummarizationEncoder(self.selection())
+        observed = []
+
+        def observe(module, args, kwargs):
+            observed.append(tuple(kwargs['input_ids'].shape))
+
+        handle = encoder.encoder.register_forward_pre_hook(observe, with_kwargs=True)
+        self.addCleanup(handle.remove)
+        actual = encoder.encode(['a cat', ' '.join(['cat'] * 100000)], truncate=True)
+        self.assertEqual(observed, [(2, 12)])
+        np.testing.assert_allclose(actual[1], self.summary_expected([4] + [8]*10 + [3]),
+                                   rtol=2e-6, atol=2e-6)
+        prepared = encoder._prepare([' '.join(['cat']*100)], encoder.prefix, truncate=True)
+        self.assertEqual(tuple(prepared['input_ids'].shape), (1, 12))
+        with self.assertRaisesRegex(ValueError, 'truncation is disabled'):
+            encoder.encode([' '.join(['cat']*11)])
+
     def test_summary_respects_model_input_limit_and_finite_fallbacks(self):
         directory = self.copied(self.summary)
         config = json.loads((directory/'config.json').read_text())

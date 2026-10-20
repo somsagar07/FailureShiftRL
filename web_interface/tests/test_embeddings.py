@@ -14,7 +14,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from embeddings import EmbeddingManager, HuggingFaceEncoder
+from embeddings import EmbeddingManager, HuggingFaceEncoder, _pca
 from server import PreviewManager, validate_config
 
 
@@ -47,6 +47,57 @@ class PixelEncoder:
 
 
 class EmbeddingTests(unittest.TestCase):
+    def test_image_preparation_overlaps_inference_without_reordering_or_reading_entire_dataset(self):
+        prepared = threading.Event()
+        read_indices = []
+        original_image = self.manager._original_image
+
+        def read(preview_id, index):
+            image = original_image(preview_id, index)
+            read_indices.append(index)
+            if index >= 8:
+                prepared.set()
+            return image
+
+        class CheckingEncoder(PixelEncoder):
+            def encode(inner, images):
+                if not inner.calls:
+                    if not prepared.wait(2):
+                        raise ValueError('Next images were not prepared during inference.')
+                    self.assertLessEqual(len(read_indices), 16, 'prefetch must be bounded, not the entire dataset')
+                return super().encode(images)
+
+        self.manager.encoder_factory = CheckingEncoder
+        colors = ['red', 'lime', 'blue'] * 10
+        preview = self.preview(colors=colors)
+        with patch.object(self.manager, '_original_image', side_effect=read):
+            job = self.overview(preview)
+        states = self.manager.discovery_context(job['id'])['states']
+        expected = np.array([[1,0,0,1], [0,1,0,1], [0,0,1,1]] * 10) / math.sqrt(2)
+        np.testing.assert_allclose(states, expected)
+        self.assertEqual(sorted(read_indices), list(range(30)))
+
+    def test_analysis_matches_dataset_names_to_model_classes_and_keeps_labels_when_reusing_features(self):
+        from datasets import Dataset, Features, ClassLabel, Image as HFImage
+        buffer = io.BytesIO()
+        Image.new('RGB', (8, 8), 'red').save(buffer, format='PNG')
+        records = Dataset.from_dict({'image': [buffer.getvalue()]*3, 'labels': [0, 1, -1]},
+            features=Features({'image': HFImage(), 'labels': ClassLabel(names=['cat', 'dog'])}))
+        with patch('datasets.load_dataset', return_value=records), patch.object(
+                PixelEncoder, 'class_labels', {0: 'dog', 4: 'cat'}, create=True):
+            dataset = self.previews.datasets.start({'source': 'huggingface', 'name': 'fixture/images'})
+            self.wait(lambda: self.previews.datasets.get(dataset['id']))
+            for space in ({'rotation': [0], 'darkness': [.1], 'saturation': []},
+                          {'rotation': [0, 5], 'darkness': [.1], 'saturation': []}):
+                preview = self.preview(dataset_id=dataset['id'], space=space)
+                job = self.manager.start(preview['id'], device='cpu')
+                job = self.wait(lambda: self.manager.get(job['id']))
+                self.assertEqual(job['status'], 'completed', job.get('error'))
+                self.assertEqual(job.get('labels', {}).get('label_map'), {'0': 4, '1': 0})
+                self.assertEqual(job['labels']['values'], {'0': 'cat', '1': 'dog'})
+                self.assertEqual(job['labels']['total'], 3)
+            self.assertTrue(job['features_reused'])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -118,6 +169,54 @@ class EmbeddingTests(unittest.TestCase):
             self.assertEqual(len(point['position']), 3)
         self.assertTrue(np.isfinite([point['position'] for point in result['points']]).all())
 
+    def test_full_analysis_and_expansion_need_no_png_writes_or_feature_disk_for_small_inputs(self):
+        preview = self.preview()
+        with patch.object(Image.Image, 'save', side_effect=AssertionError('Analysis encoded an image')):
+            job = self.overview(preview)
+            expansion = self.expansion(job, 0)
+        self.assertEqual(len(expansion['nodes']), 2)
+        self.assertEqual(list((self.previews.directory/preview['id']).rglob('*.png')), [])
+        self.assertEqual(list(self.manager.directory.rglob('*.npy')), [])
+
+    def test_spilled_features_are_released_when_graph_metadata_cannot_finish(self):
+        manager = EmbeddingManager(self.previews, self.root/'spill-error', PixelEncoder,
+                                  feature_memory_bytes=0, feature_disk_bytes=1024)
+        preview = self.preview()
+        with patch.object(self.previews.datasets, 'labels', side_effect=ValueError('Unreadable dataset labels')):
+            job = manager.start(preview['id'], device='cpu')
+            result = self.wait(lambda: manager.get(job['id']))
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('Unreadable dataset labels', result['error'])
+        self.assertEqual(manager.storage.usage(), {'memory_bytes': 0, 'disk_bytes': 0})
+        self.assertEqual(list(manager.directory.rglob('*.npy')), [])
+
+    def test_shared_analysis_cannot_release_features_while_expansion_is_queued(self):
+        first = self.overview(self.preview())
+        other_preview = self.preview(dataset_id=first['dataset_id'])
+        second = self.overview(other_preview)
+        with self.manager.model_lock:
+            expansion = self.manager.expand(second['id'], 1)
+            self.assertEqual(self.manager.release_analysis(first['id'])['status'], 'busy')
+        expanded = self.wait(lambda: self.manager.get_expansion(second['id'], expansion['id']))
+        self.assertEqual(expanded['status'], 'completed', expanded.get('error'))
+        self.assertEqual(self.manager.release_analysis(first['id'])['status'], 'released')
+        self.assertTrue(self.manager.get(second['id'])['features_released'])
+        self.assertEqual(self.manager.expand(second['id'], 1)['nodes'], expanded['nodes'])
+        with self.assertRaisesRegex(ValueError, '[Aa]nalyze.*again'):
+            self.manager.discovery_context(second['id'])
+
+    def test_feature_budget_exhaustion_never_publishes_a_sampled_analysis(self):
+        manager = EmbeddingManager(self.previews, self.root/'quota', PixelEncoder,
+                                  feature_memory_bytes=0, feature_disk_bytes=16)
+        preview = self.preview(colors=['red', 'blue', 'green']*10)
+        job = manager.start(preview['id'], device='cpu')
+        result = self.wait(lambda: manager.get(job['id']))
+        self.assertEqual(result['status'], 'error')
+        self.assertIn('FAILURESHIFT_FEATURE', result['error'])
+        self.assertEqual(result['total'], 30)
+        self.assertEqual(result['points'], [])
+        self.assertEqual(manager.storage.usage(), {'memory_bytes': 0, 'disk_bytes': 0})
+
     def test_action_images_match_previews_and_use_original_pca_and_full_cosines(self):
         preview = self.preview()
         overview = self.overview(preview)
@@ -134,10 +233,10 @@ class EmbeddingTests(unittest.TestCase):
             expected_x = red / math.sqrt(2 * (red * red + 1))
             np.testing.assert_allclose(node['position'], [expected_x, 0, 0], atol=1e-12)
             expected_cosine = (red + 1) / math.sqrt(2 * (red * red + 1))
-            self.assertAlmostEqual(node['similarity'], expected_cosine)
+            self.assertAlmostEqual(node['similarity'], expected_cosine, delta=2e-7)
             self.assertEqual(node['neighbors'][0]['index'], 0)
-            self.assertAlmostEqual(node['neighbors'][0]['similarity'], expected_cosine)
-            self.assertAlmostEqual(node['neighbors'][1]['similarity'], 1 / math.sqrt(2 * (red * red + 1)))
+            self.assertAlmostEqual(node['neighbors'][0]['similarity'], expected_cosine, delta=2e-7)
+            self.assertAlmostEqual(node['neighbors'][1]['similarity'], 1 / math.sqrt(2 * (red * red + 1)), delta=2e-7)
             rendered = Image.open(io.BytesIO(self.previews.image(preview['id'], 0, f'action-{node["id"]}')))
             digest = hashlib.sha256(rendered.convert('RGB').tobytes()).hexdigest()
             self.assertIn(digest, self.encoders[0].seen[2:])
@@ -170,19 +269,16 @@ class EmbeddingTests(unittest.TestCase):
         displayed_distance = np.linalg.norm(np.asarray(action['position']) - result['points'][0]['position'])
         self.assertNotAlmostEqual(1 - displayed_distance ** 2 / 2, expected, places=6)
 
-    def test_source_changes_do_not_change_already_visible_preview_pixels(self):
+    def test_source_changes_require_reanalysis_even_while_original_is_cached(self):
         preview = self.preview()
-        original = self.previews.image(preview['id'], 0, 'original')
-        # The existing visible preview is a frozen PNG even if the source is replaced.
+        self.previews.image(preview['id'], 0, 'original')
         path = self.previews.datasets.records[preview['config']['dataset_id']][0]['path']
         Image.new('RGB', (13, 9), 'blue').save(path)
-        overview = self.overview(preview)
-        digest = hashlib.sha256(Image.open(io.BytesIO(original)).convert('RGB').tobytes()).hexdigest()
-        self.assertEqual(self.encoders[0].seen[0], digest)
-        action = self.expansion(overview, 0)['nodes'][0]
-        expected_pixels = Image.open(io.BytesIO(self.previews.image(preview['id'], 0, f'action-{action["id"]}')))
-        action_digest = hashlib.sha256(expected_pixels.convert('RGB').tobytes()).hexdigest()
-        self.assertEqual(self.encoders[0].seen[2], action_digest)
+        job = self.manager.start(preview['id'], device='cpu')
+        result = self.wait(lambda: self.manager.get(job['id']))
+        self.assertEqual(result['status'], 'error')
+        self.assertRegex(result['error'], 'changed.*[Aa]nalyze')
+        self.assertFalse(result['points'])
 
     def test_changed_pixels_cannot_reuse_another_previews_dataset_features(self):
         preview = self.preview()
@@ -355,6 +451,103 @@ class EmbeddingTests(unittest.TestCase):
         self.assertIn('PCA', result['error'])
         self.assertFalse(result['points'])
         self.assertFalse(list(self.manager.directory.glob('*.npy')))
+
+    def test_bounded_pca_retains_every_original_and_full_cosines_in_cached_expansions(self):
+        # This fits the covariance workspace but cannot fit the dense centered
+        # matrix/SVD estimate. Dropping rows or still requiring dense PCA fails.
+        self.manager.MAX_PCA_BYTES = 4096
+        colors = [(index * 19 % 256, index * 47 % 256, index * 71 % 256)
+                  for index in range(65)]
+        preview = self.preview(colors=colors)
+        result = self.overview(preview)
+        self.assertEqual(result['completed'], len(colors))
+        self.assertEqual(result['total'], len(colors))
+        self.assertEqual([point['index'] for point in result['points']], list(range(len(colors))))
+        self.assertEqual(len(self.encoders[0].seen), len(colors))
+
+        # Independent dense SVD is a numerical reference for the same measured
+        # RGB vectors; the production bounded path must use every row in its fit.
+        raw = np.column_stack((np.asarray(colors, dtype=float) / 255, np.ones(len(colors))))
+        # Storage is FP32; fit the independent SVD in FP64 on those exact
+        # stored values so the PCA comparison still detects solver drift.
+        expected = (raw / np.linalg.norm(raw, axis=1, keepdims=True)).astype(np.float32).astype(np.float64)
+        mean = expected.mean(axis=0)
+        _, singular, vectors = np.linalg.svd(expected - mean, full_matrices=False)
+        components = vectors[:3].copy()
+        for component in components:
+            if component[np.argmax(np.abs(component))] < 0:
+                component *= -1
+        np.testing.assert_allclose([point['position'] for point in result['points']],
+                                   (expected - mean) @ components.T, atol=1e-12)
+        np.testing.assert_allclose(result['projection']['components'],
+                                   singular[:3] ** 2 / np.sum(singular ** 2), atol=1e-12)
+        np.testing.assert_allclose(self.manager.discovery_context(result['id'])['states'], expected, atol=1e-15)
+
+        expansion = self.expansion(result, 64)
+        original = expected[64]
+        red, green, blue = colors[64]
+        action = np.array([int(red * .9), int(green * .9), int(blue * .9), 255.], dtype=float)
+        action = (action / np.linalg.norm(action)).astype(np.float32).astype(np.float64)
+        np.testing.assert_allclose(expansion['nodes'][0]['position'], (action - mean) @ components.T, atol=1e-12)
+        self.assertAlmostEqual(expansion['nodes'][0]['similarity'], float(action @ original), delta=2e-7)
+        similarities = expected @ action
+        nearest = np.argsort(-similarities, kind='stable')[:5]
+        self.assertEqual([entry['index'] for entry in expansion['nodes'][0]['neighbors']], nearest.tolist())
+        np.testing.assert_allclose([entry['similarity'] for entry in expansion['nodes'][0]['neighbors']],
+                                   similarities[nearest], rtol=0, atol=2e-7)
+        self.assertEqual(self.expansion(result, 64)['nodes'], expansion['nodes'])
+        changed_actions = self.preview(dataset_id=preview['config']['dataset_id'],
+            space={'rotation': [0], 'darkness': [.2], 'saturation': []})
+        cached = self.overview(changed_actions)
+        self.assertTrue(cached['features_reused'])
+        self.assertEqual([point['position'] for point in cached['points']],
+                         [point['position'] for point in result['points']])
+
+
+class BoundedPCATests(unittest.TestCase):
+    def test_chunked_pca_agrees_with_dense_svd_on_all_rows(self):
+        values = np.random.default_rng(24).normal(size=(113, 8)) * np.arange(1, 9)
+        values /= np.linalg.norm(values, axis=1, keepdims=True)
+        expected_mean = values.mean(axis=0)
+        _, singular, vectors = np.linalg.svd(values - expected_mean, full_matrices=False)
+        expected_components = vectors[:3].copy()
+        for component in expected_components:
+            if component[np.argmax(np.abs(component))] < 0:
+                component *= -1
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'features.npy'
+            np.save(path, values)
+            features = np.load(path, mmap_mode='r')
+            mean, components, projection = _pca(features, batch_size=7)
+        np.testing.assert_allclose(mean, expected_mean, atol=1e-15)
+        np.testing.assert_allclose(components, expected_components, atol=1e-12)
+        np.testing.assert_allclose(projection['components'], singular[:3] ** 2 / np.sum(singular ** 2), atol=1e-12)
+        self.assertEqual(projection['rank'], 8)
+
+    def test_chunked_pca_does_not_invent_axes_for_identical_or_low_rank_inputs(self):
+        for rows, rank in (([[.6, .8, 0., 0.]] * 97, 0),
+                           ([[1., 0., 0., 0.], [0., 1., 0., 0.]] * 48, 1)):
+            with self.subTest(rank=rank):
+                features = np.asarray(rows)
+                mean, components, projection = _pca(features, batch_size=7)
+                self.assertEqual(projection['rank'], rank)
+                self.assertEqual(projection['components'], [float(rank), 0., 0.])
+                np.testing.assert_array_equal(components[rank:], np.zeros((3-rank, 4)))
+                if rank:
+                    np.testing.assert_allclose((features - mean) @ components.T,
+                        [[2**-.5, 0., 0.], [-2**-.5, 0., 0.]] * 48, atol=1e-14)
+                else:
+                    np.testing.assert_array_equal((features - mean) @ components.T, np.zeros((97, 3)))
+
+    def test_small_row_count_with_wide_features_keeps_the_dense_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = EmbeddingManager(None, temporary, encoder_factory=lambda model: None)
+            # A covariance matrix for these dimensions is over the budget, but
+            # two original rows have a cheap exact SVD and must remain supported.
+            manager.MAX_PCA_BYTES = 256 * 1024
+            self.assertIsNone(manager._check_pca_size(2, 4096, streamed=True))
+            with self.assertRaisesRegex(ValueError, 'PCA'):
+                manager._check_pca_size(1000, 4096, streamed=True)
 
 
 class TensorFixture:

@@ -89,30 +89,46 @@ class TerminalDQN:
                              target='observed terminal reward; no bootstrap'), temporary)
         temporary.replace(path)
 
-    def action_statistics(self, states):
+    def action_statistics(self, states, *, q_values_out=None, input_mean_out=None):
         """Describe action preference variation over originals, not failure odds.
 
         This is a single current checkpoint evaluated on every original state.
         Repeated RL visits supply no additional statistical samples. Variation
         across inputs is undefined for a single article, prompt, or image.
         """
-        states = np.asarray(states, dtype=np.float32)
-        if (states.ndim != 2 or not len(states) or states.shape[1] != self.state_dimension
-                or not np.isfinite(states).all()):
+        states = np.asarray(states)
+        if states.ndim != 2 or not len(states) or states.shape[1] != self.state_dimension:
             raise ValueError('Policy statistics require finite original embedding vectors.')
+        if q_values_out is not None and (q_values_out.shape != (len(states), self.action_count)
+                or not np.issubdtype(q_values_out.dtype, np.floating)):
+            raise ValueError('Prediction storage must match the input and action counts.')
+        if input_mean_out is not None and (input_mean_out.shape != (len(states),)
+                or not np.issubdtype(input_mean_out.dtype, np.floating)):
+            raise ValueError('Mean prediction storage must match the input count.')
+        for offset in range(0, len(states), 256):
+            if not np.isfinite(states[offset:offset+256]).all():
+                raise ValueError('Policy statistics require finite original embedding vectors.')
         result = dict(method='softmax_q_across_original_inputs', temperature=1,
                       input_count=len(states), policy_updates=self.updates, std_ddof=1, actions=[])
         if not self.updates:
             return result
-        # Merge batch moments instead of retaining an inputs-by-actions matrix.
+        # Merge summary moments in batches; optionally retain the same forward
+        # pass's rewards for the per-input predicted landscape.
         count = 0
         means = np.zeros(self.action_count, dtype=np.float64)
         squared_deviations = np.zeros_like(means)
         with self.torch.inference_mode():
             for offset in range(0, len(states), 256):
-                values = self.network(self.torch.from_numpy(states[offset:offset+256]))
+                # Copy only this batch; the source may be a leased read-only
+                # RAM array or mmap shared with Analyze and other inspections.
+                batch = self.torch.tensor(states[offset:offset+256], dtype=self.torch.float32)
+                values = self.network(batch)
                 if not self.torch.isfinite(values).all():
                     raise ValueError('Policy produced nonfinite action values.')
+                if q_values_out is not None:
+                    q_values_out[offset:offset+len(values)] = values.cpu().numpy()
+                if input_mean_out is not None:
+                    input_mean_out[offset:offset+len(values)] = values.mean(dim=1).cpu().numpy()
                 preferences = values.softmax(dim=-1).to(dtype=self.torch.float64).cpu().numpy()
                 batch_mean = preferences.mean(axis=0)
                 batch_count = len(preferences)

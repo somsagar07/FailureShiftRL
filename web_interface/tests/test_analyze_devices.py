@@ -77,7 +77,8 @@ class AnalyzeDeviceTests(unittest.TestCase):
         self.assertFalse(gpu['features_reused'])
         np.testing.assert_array_equal(self.manager.discovery_context(cpu['id'])['states'],
                                       self.manager.discovery_context(gpu['id'])['states'])
-        self.assertNotEqual(self.manager._job_bases[cpu['id']]['path'], self.manager._job_bases[gpu['id']]['path'])
+        self.assertFalse(np.shares_memory(self.manager.discovery_context(cpu['id'])['states'],
+                                         self.manager.discovery_context(gpu['id'])['states']))
         self.expansion(cpu, 0)
         self.assertEqual(self.encoders[-1].model['device'], 'cpu')
         self.assert_timings(gpu)
@@ -165,6 +166,33 @@ class AnalyzeDeviceTests(unittest.TestCase):
                                       manager.discovery_context(gpu['id'])['states'])
         np.testing.assert_array_equal([point['position'] for point in cpu['points']],
                                       [point['position'] for point in gpu['points']])
+
+    def test_cuda_memory_limit_is_remembered_for_later_batches(self):
+        attempts = []
+
+        class LimitedEncoder(PixelEncoder):
+            torch = torch
+
+            def __init__(self, selection):
+                super().__init__(selection)
+                self.device = selection['device']
+
+            def encode(self, images):
+                attempts.append(len(images))
+                if len(images) > 2:
+                    raise torch.cuda.OutOfMemoryError('fixture batch memory limit')
+                return super().encode(images)
+
+        manager = EmbeddingManager(self.previews, self.root/'adaptive', encoder_factory=LimitedEncoder)
+        preview = self.preview(colors=['red', 'lime', 'blue'] * 6)
+        manager.CUDA_IMAGE_BATCH_SIZE = 8
+        with patch.object(torch.cuda, 'is_available', return_value=True), \
+                patch.object(torch.cuda, 'get_device_name', return_value='Fixture CUDA device'), \
+                patch.object(torch.cuda, 'synchronize'), patch.object(torch.cuda, 'empty_cache'):
+            result = self.analyze(preview, 'cuda', manager=manager)
+        self.assertEqual(len(result['points']), 18)
+        self.assertEqual(attempts[:3], [8, 4, 2])
+        self.assertTrue(all(count <= 2 for count in attempts[3:]), attempts)
 
     def test_single_input_cuda_oom_is_actionable_and_never_falls_back(self):
         class NoRoomEncoder(PixelEncoder):

@@ -23,7 +23,7 @@ class Canvas {
       moveTo(x, y) {this.path.push({x, y});},
       lineTo(x, y) {this.path.push({x, y});},
       fill() {this.circles.push(...this.path.map(p => ({...p, color: this.fillStyle, alpha: this.globalAlpha})));},
-      stroke() {this.strokes.push({path: this.path.slice(), color: this.strokeStyle, alpha: this.globalAlpha, dashes: this.dashes?.slice()||[]});},
+      stroke() {this.strokes.push({path: this.path.slice(), color: this.strokeStyle, width: this.lineWidth, alpha: this.globalAlpha, dashes: this.dashes?.slice()||[]});},
       fillText(text, x, y) {this.labels.push({text, x, y});},
     };
     this.getContext = kind => {assert.equal(kind, '2d'); return ctx;};
@@ -83,8 +83,35 @@ function finiteDrawing(canvas) {
     if ('radius' in entry) assert.ok(Number.isFinite(entry.radius) && entry.radius > 0);
   }
 }
+
 const tests = [];
 function test(name, run) {tests.push({name, run});}
+
+test('predicted landscape colors untested inputs and actions without mixing measured severity',()=>{
+  const {view,canvas}=setup();
+  view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setExpansion(0,[action(4,[-.5,.5,0]),action(9,[.5,.5,0])]);
+  const camera=JSON.stringify([view.distance,view.center,view.yaw,view.pitch]);
+  const job={id:'search',status:'completed',records:[{input_index:0,action_id:4,severity:1}],
+    predicted_landscape:{policy_updates:4,input_mean_reward:[.3,.8],action_ids:[4,9]},
+    policy_statistics:{policy_updates:4,input_count:2,actions:[{action_id:4,mean:.3,std:.1},{action_id:9,mean:.7,std:.2}]}};
+  view.setDiscovery(job);
+  const fill=(kind,id)=>circles(canvas)[view.projected.findIndex(node=>node.kind===kind&&(kind==='sample'?node.data.index:node.data.id)===id)].color;
+  assert.equal(fill('sample',1),'rgb(180,72,59)','an untested original has its own predicted mean reward');
+  assert.equal(typeof view.setPredictions,'function');
+  view.setPredictions({discovery_id:'search',policy_updates:4,input_index:0,actions:[{action_id:4,q_value:.2,preference:.4},{action_id:9,q_value:.4,preference:.6}]});
+  assert.equal(fill('action',4),'rgb(80,137,81)','prediction is not overwritten by measured severity 1');
+  assert.equal(fill('action',9),'rgb(113,115,74)','untested action receives its conditional prediction');
+  view.setLandscapeMode('measured');
+  assert.equal(fill('action',4),'rgb(213,51,52)');
+  assert.equal(fill('action',9),'#9aa1a9');
+  assert.equal(fill('sample',1),'#9aa1a9');
+  view.setLandscapeMode('predicted');
+  assert.equal(fill('action',9),'rgb(113,115,74)');
+  assert.equal(JSON.stringify([view.distance,view.center,view.yaw,view.pitch]),camera);
+  view.focus(1);view.setExpansion(1,[action(9,[.5,.5,0])]);
+  assert.equal(fill('action',9),'#9aa1a9','another input must not inherit the previous input prediction');
+});
 
 test('perspective makes the near sample larger and draws it last', () => {
   const {view, canvas} = setup();
@@ -389,6 +416,7 @@ test('discovery colors only measured pairs, aggregates observed originals and pr
   const {view,canvas}=setup();
   const samples=[point(0,[-1,0,0]),point(1,[1,0,0]),point(2,[0,-1,0])];
   view.setData(samples);view.focus(0);view.setExpansion(0,[action(3,[0,1,0]),action(4,[0,2,0])]);
+  view.setLandscapeMode('measured');
   view.orbit(.2,.1);view.zoom(1.2);
   const before=view.projected.map(node=>({kind:node.kind,x:node.x,y:node.y,id:node.data.id??node.data.index}));
   const records=[{input_index:0,action_id:3,severity:1},{input_index:1,action_id:3,severity:0}];
@@ -409,6 +437,7 @@ test('discovery colors only measured pairs, aggregates observed originals and pr
 test('action size ranks cross-input preference variation, preserves ties and distinguishes unknown values',()=>{
   const {view,canvas}=setup();
   view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setLandscapeMode('measured');
   view.setExpansion(0,[action(0,[-.5,.5,0]),action(1,[0,.5,0]),action(2,[.5,.5,0]),action(3,[-.5,-.5,0]),action(4,[.5,-.5,0])]);
   const originalRadius=view.projected.find(node=>node.kind==='sample'&&node.data.index===0).radius;
   const positions=view.projected.map(node=>({kind:node.kind,id:node.data.id??node.data.index,x:node.x,y:node.y}));
@@ -440,6 +469,7 @@ test('action size ranks cross-input preference variation, preserves ties and dis
 test('selection and live updates preserve the unknown boundary; a measured zero SD is known',()=>{
   const {view,canvas}=setup();
   view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setLandscapeMode('measured');
   view.setExpansion(0,[action(0,[0,.5,0]),action(1,[.5,.5,0])]);
   const byId=id=>view.projected.find(node=>node.kind==='action'&&node.data.id===id);
   const strokes=id=>canvas.context.strokes.filter(stroke=>stroke.path.some(p=>p.x===byId(id).x&&p.y===byId(id).y&&'radius' in p));
@@ -482,6 +512,143 @@ test('single-input and untrained policy statistics remain unknown; tied statisti
   const {view,canvas}=setup();view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);view.setExpansion(0,[action(0,[-.5,.5,0]),action(1,[.5,.5,0])]);
   view.setDiscovery({status:'completed',records:[],policy_statistics:{input_count:2,policy_updates:10,actions:[{action_id:0,mean:.4,std:.1,evaluated_inputs:1},{action_id:1,mean:.6,std:.1,evaluated_inputs:1}]}});
   const actions=view.projected.filter(node=>node.kind==='action');assert.equal(actions[0].radius,actions[1].radius);finiteDrawing(canvas);
+});
+
+test('adaptation rings follow selected action IDs across originals without marking original nodes', () => {
+  const {view, canvas, selections, actions} = setup();
+  view.setData([point(0, [-1, 0, 0]), point(4, [1, 0, 0])]);
+  view.focus(0);
+  view.setExpansion(0, [action(4, [0, .5, 0]), action(5, [.5, .5, 0])]);
+  const before = circles(canvas).map(p => ({...p}));
+  assert.equal(typeof view.setAdaptation, 'function', 'the renderer accepts global action selections');
+  view.setAdaptation([4, 4]);
+  assert.deepEqual(circles(canvas), before, 'adaptation changes outlines only, preserving fill, size, and position');
+  const rings = () => canvas.context.strokes.filter(stroke => stroke.color === '#dc2626');
+  const assertActionRing = id => {
+    const node = view.projected.find(p => p.kind === 'action' && p.data.id === id);
+    assert.equal(rings().length, 1, 'only the selected action has a red ring');
+    assert.equal(rings()[0].path[0].x, node.x);
+    assert.equal(rings()[0].path[0].y, node.y);
+    assert.ok(rings()[0].path[0].radius > node.radius);
+    assert.equal(rings()[0].alpha, 1);
+    assert.equal(rings()[0].dashes.length, 0, 'adaptation rings use a solid outline');
+    assert.ok(rings()[0].width >= 2, 'adaptation rings remain clearly visible');
+  };
+  assertActionRing(4);
+  view.clearFocus();
+  assert.equal(rings().length, 0, 'collapsed originals do not inherit action selections');
+  view.focus(4);
+  view.setExpansion(4, [action(4, [-.5, .5, 0]), action(5, [.5, .5, 0])]);
+  assertActionRing(4);
+  view.setAdaptation([5]);
+  assertActionRing(5);
+  assert.equal(selections.length + actions.length, 0, 'programmatic adaptation selection emits no user callbacks');
+});
+
+test('adaptation updates and discovery polling preserve camera, positions, focus, and inspected action', () => {
+  const {view, canvas} = setup();
+  const samples = [point(0, [-1, 0, 0]), point(1, [1, 0, 0])];
+  const nodes = [action(4, [0, .5, .3]), action(5, [.5, .5, 0])];
+  view.setData(samples);
+  view.focus(0);
+  view.setExpansion(0, nodes);
+  view.selectAction(5);
+  view.orbit(.2, .1);
+  view.zoom(1.2);
+  view.pan = {x: 14, y: -9};
+  view.render();
+  const state = () => ({yaw: view.yaw, pitch: view.pitch, distance: view.distance,
+    fitDistance: view.fitDistance, pan: {...view.pan}, center: Array.from(view.center), scale: view.scale,
+    focusIndex: view.focusIndex, selectedAction: view.selectedAction,
+    positions: view.projected.map(node => ({kind: node.kind, id: node.data.id ?? node.data.index, x: node.x, y: node.y}))});
+  const before = state();
+  view.setAdaptation([4]);
+  assert.deepEqual(state(), before);
+  view.setDiscovery({status: 'running', current: {input_index: 0, action_id: 4},
+    records: [{input_index: 0, action_id: 4, severity: .9}],
+    policy_statistics: {input_count: 2, policy_updates: 3, actions: [
+      {action_id: 4, mean: .7, std: .02}, {action_id: 5, mean: .3, std: .1},
+    ]}});
+  assert.deepEqual(state(), before, 'polls preserve graph navigation and the inspected action');
+  view.setExpansion(0, nodes.map(node => ({...node, position: [...node.position]})));
+  assert.deepEqual(state(), before, 'replacement expansion data preserves graph navigation');
+  for (const job of [{status: 'completed', records: []}, null]) {
+    view.setDiscovery(job);
+    assert.deepEqual(state(), before);
+    assert.equal(canvas.context.strokes.filter(stroke => stroke.color === '#dc2626').length, 1,
+      'discovery updates do not discard adaptation selections');
+  }
+  assert.equal(view.points, samples);
+  assert.deepEqual(nodes.map(node => node.position), [[0, .5, .3], [.5, .5, 0]]);
+});
+
+test('adaptation has a separate outer ring alongside unknown SD, inspected action, and live pulse', () => {
+  const {view, canvas} = setup();
+  view.setData([point(0, [-1, 0, 0]), point(1, [1, 0, 0])]);
+  view.setLandscapeMode('measured');
+  view.focus(0);
+  view.setExpansion(0, [action(4, [0, .5, 0])]);
+  view.selectAction(4);
+  view.setDiscovery({status: 'running', current: {input_index: 0, action_id: 4},
+    records: [{input_index: 0, action_id: 4, severity: 1}]});
+  const before = circles(canvas).map(p => ({...p}));
+  view.setAdaptation([4]);
+  const node = view.projected.find(p => p.kind === 'action');
+  const ring = color => canvas.context.strokes.find(stroke => stroke.color === color &&
+    stroke.path.some(p => p.x === node.x && p.y === node.y && 'radius' in p));
+  const unknown = ring('#7c3aed'), inspected = ring('#202a35'), pulse = ring('#203f72'), adapted = ring('#dc2626');
+  assert.ok(unknown && inspected && pulse && adapted, 'all four visual meanings remain visible');
+  assert.equal(unknown.path[0].radius, node.radius);
+  assert.ok(unknown.dashes.length, 'the purple unknown-SD boundary remains dashed');
+  assert.ok(adapted.path[0].radius - inspected.path[0].radius > (adapted.width + inspected.width) / 2,
+    'the adaptation outline has a visible gap from the inspected-action outline');
+  assert.ok(adapted.path[0].radius - (node.radius + 10) > (adapted.width + pulse.width) / 2,
+    'the adaptation outline stays outside the maximum live pulse');
+  assert.deepEqual(circles(canvas), before, 'adaptation preserves measured severity colors and SD sizes');
+  assert.equal(circles(canvas)[view.projected.indexOf(node)].color, 'rgb(213,51,52)');
+  finiteDrawing(canvas);
+});
+
+test('clearing, replacing data, and resetting remove adaptation outlines', () => {
+  const {view, canvas} = setup();
+  const samples = [point(0, [-1, 0, 0]), point(1, [1, 0, 0])];
+  const expand = () => {view.focus(0); view.setExpansion(0, [action(4, [0, .5, 0])]);};
+  const ringCount = () => canvas.context.strokes.filter(stroke => stroke.color === '#dc2626').length;
+  view.setData(samples);
+  expand();
+  for (const clear of [[], null]) {
+    view.setAdaptation([4]);
+    assert.equal(ringCount(), 1);
+    view.setAdaptation(clear);
+    assert.equal(ringCount(), 0);
+  }
+  view.setAdaptation([4]);
+  view.setData(samples);
+  expand();
+  assert.equal(ringCount(), 0, 'a new dataset does not inherit adaptation selections');
+  view.setAdaptation([4]);
+  view.reset();
+  assert.equal(ringCount(), 0);
+  // Add data directly so the assertion tests reset itself rather than another setData call.
+  view.points = samples;
+  expand();
+  assert.equal(ringCount(), 0, 'reset clears the stored action selections');
+});
+
+test('hover describes adaptation selection only on selected actions', () => {
+  const {view, canvas} = setup();
+  view.setData([point(0, [-1, 0, 0]), point(1, [1, 0, 0])]);
+  view.focus(0);
+  view.setExpansion(0, [action(4, [0, .5, 0]), action(5, [.5, .5, 0])]);
+  view.setAdaptation([4]);
+  const hover = node => canvas.fire('pointermove', {clientX: canvas.box.left + node.x, clientY: canvas.box.top + node.y});
+  for (const node of view.projected) {
+    hover(node);
+    assert.equal(/selected for adaptation/i.test(canvas.title), node.kind === 'action' && node.data.id === 4);
+  }
+  view.setAdaptation([]);
+  hover(view.projected.find(node => node.kind === 'action' && node.data.id === 4));
+  assert.doesNotMatch(canvas.title, /selected for adaptation/i);
 });
 
 let failures = 0;

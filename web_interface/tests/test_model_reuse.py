@@ -88,7 +88,8 @@ class ModelReuseTests(unittest.TestCase):
             hook.remove()
         self.assertEqual(gpu.device, 'cuda')
         self.assertEqual(observed, [('cuda', torch.float32, 'cuda', True)])
-        self.assertEqual(actual.dtype, np.float64)
+        self.assertEqual(actual.dtype, np.float32)
+        self.assertEqual(expected.dtype, np.float32)
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
         gpu.set_device('cpu')
         self.assertEqual(gpu.device, 'cpu')
@@ -239,6 +240,22 @@ class GenerationReuseTests(unittest.TestCase):
     setUpClass = classmethod(generation_fixtures.GenerationTests.setUpClass.__func__)
     model = generation_fixtures.GenerationTests.model
 
+    def test_changing_generation_precision_creates_independent_inference_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = EmbeddingManager(None, root/'embeddings')
+            self.addCleanup(manager.release_encoder)
+            selection = self.model()
+            settings = {'task': 'generation', 'generation_metric': 'clip', 'generation_steps': 1,
+                        'generation_size': 32, '_clip_model': {'source': 'local', 'name': str(self.clip)}}
+            first = manager.evaluation_model(selection, settings, root/'automatic')
+            pipeline = first.pipeline
+            first.close()
+            second = manager.evaluation_model(selection, {**settings, 'generation_precision': 'float32'}, root/'full')
+            self.addCleanup(second.close)
+            self.assertIsNot(second.pipeline, pipeline, 'precision changes must not reuse a differently configured renderer')
+            self.assertEqual(second.config['generation_precision'], 'float32')
+
     def test_pipeline_reuses_prompt_encoder_and_keeps_seeded_images_and_run_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -247,6 +264,7 @@ class GenerationReuseTests(unittest.TestCase):
             encoder = manager._load_encoder(selection, _model_key(selection))
             features = encoder.encode(['a cat'])
             config = {'task': 'generation', 'generation_steps': 2, 'generation_size': 32,
+                      'generation_metric': 'clip',
                       '_clip_model': {'source': 'local', 'name': str(self.clip)}}
             with patch('transformers.CLIPTextModel.from_pretrained',
                        side_effect=AssertionError('Prompt encoder weights were loaded again')):

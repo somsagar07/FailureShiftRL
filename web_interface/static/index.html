@@ -3,28 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>failureshiftRL</title>
+  <title>FailureShift</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
   <script src="/graph.js" defer></script>
   <script src="/embedding-view.js" defer></script>
   <script src="/embedding-controller.js" defer></script>
+  <script src="/adaptation-controller.js" defer></script>
   <script src="/discovery-controller.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
-<body>
-  <aside>
-    <div class="name">failureshiftRL</div>
-    <h2>Workspace</h2>
+<body id="workspace-shell" data-sidebar-collapsed="false">
+  <aside id="workspace-sidebar" aria-label="Workspace">
+    <div class="sidebar-heading">
+      <div class="name">FailureShift</div>
+      <button id="workspace-sidebar-toggle" type="button" aria-label="Collapse workspace sidebar" title="Collapse workspace sidebar" aria-controls="workspace-sidebar" aria-expanded="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path class="sidebar-toggle-chevron" d="m16 9-3 3 3 3"/></svg>
+      </button>
+    </div>
+    <h2 class="workspace-label">Workspace</h2>
     <nav aria-label="Workspace domains">
-      <button type="button" class="domain active" data-task="classification">Image classification</button>
-      <button type="button" class="domain" data-task="summarization">Summarization</button>
-      <button type="button" class="domain" data-task="generation">Image generation</button>
+      <button type="button" class="domain active" data-task="classification" aria-label="Image classification" aria-current="page" title="Image classification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m4 18 5-5 4 4 3-3 5 5"/></svg><span class="domain-label">Image classification</span></button>
+      <button type="button" class="domain" data-task="summarization" aria-label="Summarization" title="Summarization"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14M5 8h14M5 12h9M5 17h6m-3-3 3 3-3 3"/></svg><span class="domain-label">Summarization</span></button>
+      <button type="button" class="domain" data-task="generation" aria-label="Image generation" title="Image generation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M14 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-9M4 18l5-5 4 4 3-3 4 4M18 1l1.2 3.8L23 6l-3.8 1.2L18 11l-1.2-3.8L13 6l3.8-1.2Z"/></svg><span class="domain-label">Image generation</span></button>
     </nav>
   </aside>
   <main>
     <h1 id="domain-title">Image classification</h1>
-    <p id="workspace-description" class="hint">Explore model embeddings. Select an image to see how actions change it.</p>
-    <div class="layout">
+    <p id="workspace-description" class="hint">Choose a model, load your images, and explore actions.</p>
+    <div id="workspace-layout" class="layout" data-stage="analyze">
       <form id="preview-form">
         <fieldset id="config-fields">
           <label for="model-source">Model source</label>
@@ -54,23 +61,108 @@
             <div id="hf-dataset-fields" hidden>
               <label for="dataset-preset">Hugging Face dataset</label>
               <select id="dataset-preset"></select>
-              <p class="hint">Presets fill in the settings below. Downloads start when you load input data.</p>
+              <p id="dataset-access-note" class="hint" hidden><a href="https://huggingface.co/datasets/ILSVRC/imagenet-1k" target="_blank" rel="noopener noreferrer">ImageNet access</a> and server authentication required. Set Rows to stream a subset; blank loads the full split.</p>
               <div id="dataset-name-fields" hidden>
                 <label for="dataset-name">Dataset ID</label>
                 <input id="dataset-name" type="text" placeholder="owner/image-dataset">
               </div>
-              <label for="dataset-split">Split</label>
-              <input id="dataset-split" type="text" value="train" placeholder="train or train[:100]">
-              <details class="dataset-options"><summary>Dataset options</summary>
-                <label for="dataset-config">Configuration (optional)</label>
-                <input id="dataset-config" type="text" placeholder="Dataset's default configuration">
-                <label for="dataset-column">Image column (optional)</label>
-                <input id="dataset-column" type="text" placeholder="Detect automatically">
+              <label id="dataset-splits-label">Splits</label>
+              <details id="dataset-splits" class="split-picker">
+                <summary id="dataset-split-summary" aria-describedby="dataset-splits-label">Select a dataset</summary>
+                <div id="dataset-split-options" role="group" aria-labelledby="dataset-splits-label"></div>
               </details>
+              <p id="dataset-options-status" class="hint" role="status"></p>
+              <button id="dataset-refresh" type="button" hidden>Retry dataset options</button>
+              <details class="dataset-options"><summary>Dataset options</summary>
+                <label for="dataset-subset">Rows <span class="hint">optional</span></label>
+                <input id="dataset-subset" type="text" placeholder="All rows" aria-describedby="dataset-subset-help" autocomplete="off">
+                <p id="dataset-subset-help" class="hint">Blank: all rows · 20: first 20 · [20:30]: rows 20–29. Ranges use the combined splits, starting at 0.</p>
+                <label for="dataset-config">Configuration</label>
+                <select id="dataset-config"><option value="">Automatic</option></select>
+                <label for="dataset-column">Image column</label>
+                <select id="dataset-column"><option value="">Automatic</option></select>
+                <label for="dataset-label-column">Label column</label>
+                <select id="dataset-label-column"><option value="">Automatic</option></select>
+              </details>
+              <div id="dataset-model-choice" class="dataset-model-choice" hidden>
+                <p id="dataset-model-help" class="hint"></p>
+                <button type="button" id="dataset-use-model">Use matching model</button>
+              </div>
             </div>
             <button type="button" id="load-dataset">Load input data</button>
             <p id="dataset-status" class="hint" aria-live="polite">Select a folder or dataset containing your images.</p>
+            <p id="dataset-label-status" class="hint" role="status" hidden></p>
             <p id="dataset-summary" class="hint"></p>
+          </div>
+          <div id="summary-fields" hidden>
+            <label for="summary-source">Data source</label>
+            <select id="summary-source"><option value="dataset" selected>Hugging Face dataset</option><option value="text">Paste text</option></select>
+            <div id="summary-dataset-fields">
+              <label for="summary-dataset-preset">Hugging Face dataset</label>
+              <select id="summary-dataset-preset"></select>
+              <div id="summary-dataset-name-fields" hidden>
+                <label for="summary-dataset-name">Dataset ID</label>
+                <input id="summary-dataset-name" type="text" placeholder="owner/summarization-dataset" autocomplete="off">
+              </div>
+              <label id="summary-dataset-splits-label">Splits</label>
+              <details id="summary-dataset-splits" class="split-picker">
+                <summary id="summary-dataset-split-summary" aria-describedby="summary-dataset-splits-label">Select a dataset</summary>
+                <div id="summary-dataset-split-options" role="group" aria-labelledby="summary-dataset-splits-label"></div>
+              </details>
+              <p id="summary-dataset-options-status" class="hint" role="status"></p>
+              <button id="summary-dataset-refresh" type="button" hidden>Retry dataset options</button>
+              <details class="dataset-options"><summary>Dataset options</summary>
+                <label for="summary-dataset-subset">Rows <span class="hint">optional</span></label>
+                <input id="summary-dataset-subset" type="text" placeholder="All rows" aria-describedby="summary-dataset-subset-help" autocomplete="off">
+                <p id="summary-dataset-subset-help" class="hint">Blank: all rows · 20: first 20 · [20:30]: rows 20–29. Ranges use the combined splits, starting at 0.</p>
+                <label for="summary-dataset-config">Configuration</label>
+                <select id="summary-dataset-config"><option value="">Automatic</option></select>
+                <label for="summary-dataset-text-column">Article column</label>
+                <select id="summary-dataset-text-column"><option value="">Automatic</option></select>
+                <label for="summary-dataset-summary-column">Reference summary column</label>
+                <select id="summary-dataset-summary-column"><option value="">Automatic</option></select>
+                <p class="hint">Long articles use the model’s input limit.</p>
+              </details>
+              <button type="button" id="load-summary-dataset">Load input data</button>
+              <p id="summary-dataset-status" class="hint" aria-live="polite">Select and load your articles.</p>
+              <p id="summary-dataset-reference-status" class="hint" role="status" hidden></p>
+              <p id="summary-dataset-count" class="hint"></p>
+            </div>
+          </div>
+          <div id="generation-fields" hidden>
+            <label for="generation-source">Input</label>
+            <select id="generation-source"><option value="dataset" selected>Dataset</option><option value="text">Enter prompt</option></select>
+            <div id="generation-dataset-fields">
+              <label for="generation-dataset-preset">Prompt dataset</label>
+              <select id="generation-dataset-preset"></select>
+              <div id="generation-dataset-name-fields" hidden>
+                <label for="generation-dataset-name">Hugging Face dataset ID</label>
+                <input id="generation-dataset-name" type="text" placeholder="owner/prompt-dataset" autocomplete="off">
+              </div>
+              <label id="generation-dataset-splits-label">Splits</label>
+              <details id="generation-dataset-splits" class="split-picker">
+                <summary id="generation-dataset-split-summary" aria-describedby="generation-dataset-splits-label">Select a dataset</summary>
+                <div id="generation-dataset-split-options" role="group" aria-labelledby="generation-dataset-splits-label"></div>
+              </details>
+              <p id="generation-dataset-options-status" class="hint" role="status"></p>
+              <button id="generation-dataset-refresh" type="button" hidden>Retry dataset options</button>
+              <details class="dataset-options"><summary>Dataset options</summary>
+                <label for="generation-dataset-subset">Rows <span class="hint">optional</span></label>
+                <input id="generation-dataset-subset" type="text" placeholder="All rows" aria-describedby="generation-dataset-subset-help" autocomplete="off">
+                <p id="generation-dataset-subset-help" class="hint">Blank: all rows · 20: first 20 · [20:30]: rows 20–29. Ranges use the combined splits, starting at 0.</p>
+                <label for="generation-dataset-config">Configuration</label>
+                <select id="generation-dataset-config"><option value="">Automatic</option></select>
+                <label for="generation-dataset-prompt-column">Prompt column</label>
+                <select id="generation-dataset-prompt-column"><option value="">Automatic</option></select>
+                <label for="generation-dataset-checks-column">Requirements column <span class="hint">optional</span></label>
+                <select id="generation-dataset-checks-column"><option value="">None</option></select>
+                <p class="hint">Requirements contain questions and expected answers about the prompt’s content.</p>
+              </details>
+              <button type="button" id="load-generation-dataset">Load input data</button>
+              <p id="generation-dataset-status" class="hint" aria-live="polite">Select and load your prompts.</p>
+              <p id="generation-dataset-checks-status" class="hint" role="status" hidden></p>
+              <p id="generation-dataset-count" class="hint"></p>
+            </div>
           </div>
           <div id="text-fields" hidden>
             <label for="source-text" id="source-label">Text</label>
@@ -80,31 +172,38 @@
 
           <h2>Action space <span id="action-count" class="hint">125 combinations</span></h2>
           <p id="action-help" class="hint" hidden></p>
-          <div id="action-editor"></div>
+          <label class="sr-only" for="action-add">Add action</label>
+          <select id="action-add"><option value="">＋ Add action…</option></select>
+          <div id="action-chips" class="action-chips" aria-label="Selected actions"></div>
+          <div id="action-editor" class="action-values" hidden></div>
           <button type="button" id="reset-actions">Restore all actions</button>
           <p id="action-error" class="error" role="alert" hidden></p>
-          <label for="analysis-device">Analyze device</label>
-          <select id="analysis-device"><option value="auto">Automatic (CUDA when available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
+          <details id="analysis-additional-options" class="analysis-options"><summary>Additional options</summary>
+            <label for="analysis-device">Analyze device</label>
+            <select id="analysis-device"><option value="auto">Automatic (CUDA when available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
+          </details>
         </fieldset>
         <p id="form-error" class="error" role="alert" hidden></p>
         <button id="generate" class="primary" type="submit" disabled>Analyze</button>
       </form>
 
       <section class="viewer" aria-label="Input combinations">
-        <h2 id="viewer-title">Embedding space</h2>
+        <h2 id="viewer-title">Search space</h2>
         <div id="input-browser" hidden>
-          <label for="image-select">Dataset image</label><select id="image-select"></select>
+          <label for="image-select" id="input-browser-label">Dataset image</label><select id="image-select"></select>
           <div class="image-pagination"><button type="button" id="previous-images">Previous images</button><span id="image-page" class="hint"></span><button type="button" id="next-images">Next images</button></div>
         </div>
-        <p id="preview-status" class="hint" aria-live="polite">Click Analyze to explore model embeddings and action combinations.</p>
+        <p id="preview-status" class="hint" aria-live="polite">Choose your input, then Analyze to build the search space.</p>
         <figure id="dataset-preview" class="dataset-preview" hidden>
           <div id="dataset-preview-image"></div>
+          <details id="dataset-preview-reference" class="reference-disclosure" hidden><summary>Reference summary</summary><pre id="dataset-preview-reference-text"></pre></details>
+          <details id="dataset-preview-requirements" class="reference-disclosure" hidden></details>
           <figcaption id="dataset-preview-name"></figcaption>
         </figure>
         <div class="graph-layout">
         <div id="embedding-wrap" class="embedding-wrap" hidden>
           <div class="embedding-toolbar">
-            <span class="embedding-legend"><i class="sample-dot"></i>Inputs <i class="action-dot"></i>Actions</span>
+            <span class="embedding-legend"><i id="embedding-input-dot" class="sample-dot"></i>Inputs <i id="embedding-action-dot" class="action-dot"></i>Actions</span>
             <div class="embedding-buttons">
               <button id="embedding-back" type="button" disabled>All inputs</button>
               <button id="embedding-zoom-out" type="button" aria-label="Zoom out in 3D">−</button>
@@ -113,7 +212,13 @@
 
             </div>
           </div>
-          <canvas id="embedding-canvas" tabindex="0" role="group" aria-label="3D model embedding graph. Drag to rotate, Shift-drag to pan, scroll to zoom. Select inputs and actions using the dropdowns or by clicking points. Arrow keys rotate, plus and minus zoom, zero fits, Escape shows all inputs."></canvas>
+          <div class="embedding-stage">
+            <canvas id="embedding-canvas" tabindex="0" role="group" aria-label="3D model embedding graph. Drag to rotate, Shift-drag to pan, scroll to zoom. Select inputs and actions using the dropdowns or by clicking points. Arrow keys rotate, plus and minus zoom, zero fits, Escape shows all inputs."></canvas>
+            <div id="adapt-graph-action" class="graph-ft-action" role="group" aria-label="Fine-tuning action" hidden>
+              <span id="adapt-graph-description" aria-live="polite"></span>
+              <button id="adapt-graph-toggle" type="button" aria-describedby="adapt-graph-description" disabled>Add to FT actions</button>
+            </div>
+          </div>
           <div class="embedding-footer">
             <p id="embedding-focus" aria-live="polite"></p>
             <div id="embedding-actions" hidden>
@@ -122,34 +227,130 @@
             </div>
             <p id="embedding-meta" class="hint"></p>
             <details id="analysis-performance" hidden><summary id="analysis-performance-summary"></summary><dl id="analysis-timings" class="metric-rows"></dl><p class="hint">Files / download includes model file lookup and any downloads. Total includes input preparation and other analysis work. Queue wait is separate.</p></details>
-            <div class="discovery-launch"><button id="find-failure" type="button" disabled>Find failure</button></div>
+            <a id="analysis-report" class="report-link" target="_blank" rel="noopener noreferrer" hidden>Open analysis report ↗</a>
+            <div class="discovery-launch" role="group" aria-label="Workflow panels"><button id="find-failure" type="button" disabled aria-controls="discovery-panel" aria-pressed="false">Find failure</button><button id="adapt" type="button" disabled aria-controls="adapt-panel" aria-expanded="false" aria-pressed="false">Adapt</button><button id="discovery-retry" type="button" hidden>Retry status</button></div>
             <ul id="severity-legend" class="discovery-legend" aria-label="Discovery graph legend" hidden>
-              <li title="Measured severity. Original inputs average their observed action pairs."><span>Severity</span> Low <span class="severity-gradient" aria-hidden="true"></span> High</li>
-              <li><i class="legend-dot" aria-hidden="true"></i>Unevaluated</li>
+              <li><label for="landscape-mode">View</label><select id="landscape-mode"><option value="predicted">Predicted</option><option value="measured">Measured</option></select></li>
+              <li id="landscape-scale"><span id="landscape-scale-label">Predicted reward</span> Low <span class="severity-gradient" aria-hidden="true"></span> High</li>
+              <li><i class="legend-dot" aria-hidden="true"></i><span id="landscape-unavailable">Awaiting learning</span></li>
+              <li id="landscape-evidence" title="Dashed: estimated only. Solid: model evaluated. For an original input, solid means at least one action was tested." hidden><i class="legend-dot legend-estimated" aria-hidden="true"></i>Estimated<i class="legend-dot legend-tested" aria-hidden="true"></i>Tested</li>
               <li><i class="legend-dot legend-current" aria-hidden="true"></i>Current</li>
               <li><i class="legend-dot legend-selected" aria-hidden="true"></i>Selected</li>
+              <li id="adapt-legend" hidden><i class="legend-dot legend-adaptation" aria-hidden="true"></i>FT actions</li>
               <li title="Standard deviation is unavailable. The action keeps a neutral size."><i class="legend-dot unknown-std-key" aria-hidden="true"></i>SD unavailable</li>
               <li title="Action size ranks DQN preference variation across original inputs, not failure confidence. Original input sizes stay fixed."><span class="legend-sizes" aria-hidden="true"><i></i><i></i></span>Larger = lower variation</li>
             </ul>
+            <p id="landscape-error" class="error" role="alert" hidden></p>
             <p class="hint embedding-help">Drag to rotate · Shift-drag to pan · scroll to zoom · click a point to explore</p>
           </div>
+        </div>
+        <div class="adapt-inspection">
+        <section id="adapt-panel" class="adapt-panel" hidden aria-label="Model adaptation">
+          <div class="adapt-heading"><h3>Adapt</h3><button id="adapt-close" type="button">Back to Find failure</button></div>
+          <fieldset id="adapt-settings">
+            <p id="adapt-summary" role="status"></p>
+            <p class="hint">Red rings mark FT actions. Click an action node to add or remove it.</p>
+            <details class="adapt-action-options"><summary>Choose from the action list</summary><div class="adapt-action-picker"><label for="adapt-action-choice">Action</label><select id="adapt-action-choice"><option value="">Select a graph node or action…</option></select><button id="adapt-toggle-action" type="button" disabled>Add to FT actions</button></div></details>
+            <h4>FT actions</h4>
+            <div class="adapt-table-wrap"><table><thead><tr><th scope="col">Selected actions</th><th scope="col" title="Failures among distinct evaluated inputs; repeated visits are counted once.">Failure rate</th><th scope="col">Tested inputs</th><th scope="col">Severity</th><th scope="col"><span class="sr-only">Selection controls</span></th></tr></thead><tbody id="adapt-selection"></tbody></table></div>
+            <h4>Training data</h4>
+            <p id="adapt-data-help" class="hint"></p>
+            <div id="adapt-data-source-field"><label for="adapt-data-source">Use</label><select id="adapt-data-source"><option id="adapt-current-option" value="current">Analyzed article</option><option value="json">Training dataset (JSON)</option></select></div>
+            <div id="adapt-summary-field" hidden><label for="adapt-summary-reference">Reference summary</label><textarea id="adapt-summary-reference" rows="3" maxlength="20000"></textarea></div>
+            <div id="adapt-json-fields" hidden>
+              <label for="adapt-data-file">Upload training JSON</label><input id="adapt-data-file" type="file" accept=".json,application/json">
+              <label for="adapt-data-json">Or paste JSON</label><textarea id="adapt-data-json" rows="4" maxlength="20971520" spellcheck="false" aria-describedby="adapt-json-help"></textarea>
+              <p id="adapt-json-help" class="hint"></p>
+            </div>
+            <div id="adapt-targets"></div>
+            <label id="adapt-originals-field" class="adapt-checkbox"><input id="adapt-include-originals" type="checkbox" checked>Include original inputs</label>
+            <p id="adapt-training-count" role="status" class="hint"></p>
+            <div class="compact-row"><label>Epochs <input id="finetune-epochs" type="number" min="1" max="100" value="1"></label><label>Learning rate <input id="finetune-lr" type="number" min="0.00000001" max="0.1" step="any" value="0.001"></label></div>
+            <details id="finetune-additional-options" class="training-options"><summary>Additional options</summary>
+              <label for="finetune-device">Training device</label>
+              <select id="finetune-device"><option value="auto">Automatic (GPU if available)</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select>
+              <label for="finetune-batch-size">Batch size</label>
+              <select id="finetune-batch-size" aria-describedby="finetune-batch-help"><option value="auto">Automatic</option><option value="1">1</option><option value="2">2</option><option value="4">4</option><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select>
+              <p id="finetune-batch-help" class="hint">Examples per update. Smaller chunks are accumulated when GPU memory is limited.</p>
+              <label for="finetune-seed">Training seed</label>
+              <input id="finetune-seed" type="number" min="0" max="4294967295" step="1" value="42" aria-describedby="finetune-seed-help">
+              <p id="finetune-seed-help" class="hint">Controls training randomness, independently of Find failure.</p>
+              <div class="compact-row"><label>Weight decay <input id="finetune-weight-decay" type="number" min="0" max="1" step="any" value="0.01" aria-describedby="finetune-weight-decay-help"></label><label>Gradient clipping <input id="finetune-max-grad-norm" type="number" min="0" max="100" step="any" value="1" aria-describedby="finetune-grad-help"></label></div>
+              <p id="finetune-weight-decay-help" class="hint">AdamW regularization strength. Set to 0 to disable.</p>
+              <p id="finetune-grad-help" class="hint">Maximum gradient norm. Set to 0 to disable clipping.</p>
+              <label class="adapt-checkbox cleanup-option"><input id="finetune-cleanup" type="checkbox" aria-describedby="finetune-cleanup-help" checked>Clear temporary data after training</label>
+              <p id="finetune-cleanup-help" class="hint">Keeps the checkpoint, reports, and source inputs.</p>
+            </details>
+          </fieldset>
+          <p id="adapt-training-blocker" class="hint" role="status" hidden></p>
+          <div class="job-buttons"><button id="finetune-start" type="button" aria-describedby="adapt-training-count adapt-training-blocker" disabled>Start fine-tuning</button><button id="finetune-cancel" type="button" hidden>Cancel training</button></div>
+          <p id="adapt-error" class="error" role="alert" hidden></p>
+          <p id="finetune-status" role="status"></p><progress id="finetune-progress" value="0" max="1" hidden></progress>
+          <p id="finetune-batch-info" class="hint" role="status"></p>
+          <p id="finetune-cleanup-status" class="hint" role="status" hidden></p>
+          <a id="finetune-report" class="report-link" target="_blank" rel="noopener noreferrer" hidden>Open adaptation report ↗</a>
+          <div id="finetune-checkpoint" hidden><label for="finetune-path">Saved local model</label><input id="finetune-path" type="text" readonly><button id="finetune-use" type="button">Select checkpoint for Analyze</button><p class="hint">Evaluate this checkpoint on held-out inputs to measure improvement.</p></div>
+        </section>
+        <div id="details" hidden>
+          <div class="input-pair">
+            <section><h3>Original input</h3><div id="original-view"></div><details id="original-reference" class="reference-disclosure" hidden><summary>Reference summary</summary><pre id="original-reference-text"></pre></details><details id="original-requirements" class="reference-disclosure" hidden></details></section>
+            <section><h3 id="selected-title">Selected combination</h3><div id="selected-view"></div></section>
+          </div>
+          <p id="selected-action"></p>
+          <p id="embedding-similarity" class="hint" hidden></p>
+        </div>
         </div>
         <section id="discovery-panel" class="discovery-panel" hidden aria-label="Failure discovery">
           <h3>Find failure</h3>
           <fieldset id="discovery-settings">
             <div class="compact-row"><label>Episodes <input id="discovery-episodes" type="number" min="1" max="10000" value="100"></label><label>Seed <input id="discovery-seed" type="number" min="0" value="42"></label></div>
-            <div id="discovery-labels"><label for="discovery-label-map">Labels (optional JSON)</label><textarea id="discovery-label-map" rows="2" placeholder='{"0": "cat", "1": 281}'></textarea><p class="hint">Input indices start at 0. Use exact model label names or class IDs; dataset labels are not mapped automatically. Without labels, findings are prediction-change candidates.</p></div>
-            <div id="discovery-summary" hidden><label for="discovery-reference">Human reference summary (required)</label><textarea id="discovery-reference" rows="3"></textarea><label for="discovery-metric">Summary review metric</label><select id="discovery-metric"><option value="grounded">Source grounding (NLI) + reference ROUGE-L</option><option value="reference">Fast reference overlap (ROUGE-L)</option></select></div>
-            <p id="discovery-generation" class="hint" hidden>Generates real images and scores prompt/image CLIP alignment with matched noise seeds. This is a review signal, not a demographic bias measurement.</p>
-            <details><summary>Evaluation options</summary><label id="discovery-threshold-field">Quality-drop threshold <input id="discovery-threshold" type="number" min="0" max="1" step="0.01" value="0.15"></label><div id="generation-options" hidden><label>Diffusion steps <input id="discovery-steps" type="number" min="1" max="100" value="12"></label><label>Image size <select id="discovery-size"><option value="256">256</option><option value="512">512</option></select></label></div><label>Device <select id="discovery-device"><option value="auto">Automatic</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></label></details>
+            <div id="discovery-labels" class="label-settings">
+              <div class="field-title">Labels</div>
+              <p id="discovery-label-summary" class="label-summary" role="status"></p>
+              <p id="discovery-label-source" class="hint"></p>
+              <div class="label-buttons">
+                <button id="discovery-label-upload" type="button" title="Choose a JSON label file under 2 MB">Upload JSON</button>
+                <input id="discovery-label-file" type="file" accept=".json,application/json" aria-label="Upload JSON labels" hidden>
+                <button id="discovery-label-edit" type="button" aria-controls="discovery-label-preview discovery-label-editor" aria-expanded="false">Edit labels</button>
+                <button id="discovery-label-view" type="button" aria-controls="discovery-label-preview" aria-expanded="false">View current labels</button>
+              </div>
+              <div id="discovery-label-preview" class="label-preview" hidden>
+                <div class="label-table-wrap"><table><thead><tr><th scope="col">Input</th><th scope="col">Source</th><th scope="col">Label</th><th scope="col">Status</th></tr></thead><tbody id="discovery-label-preview-rows"></tbody></table></div>
+                <div class="label-pagination"><button id="discovery-label-previous" type="button">Previous</button><span id="discovery-label-preview-count" class="hint"></span><button id="discovery-label-next" type="button">Next</button></div>
+              </div>
+              <div id="discovery-label-editor" hidden>
+                <p class="hint">Enter a model class name or #ID (for example, #281).</p>
+                <datalist id="discovery-label-classes"></datalist>
+                <details><summary>Paste or edit JSON</summary>
+                  <label for="discovery-label-map" class="hint">Labels by input index</label>
+                  <textarea id="discovery-label-map" rows="3" maxlength="2097152" spellcheck="false" placeholder='{"0": "cat", "1": 281}' aria-describedby="discovery-label-format discovery-label-error"></textarea>
+                  <p id="discovery-label-format" class="hint">Input index (starting at 0) → model class ID or class name.</p>
+                </details>
+                <button id="discovery-label-clear" type="button">Restore dataset labels</button>
+              </div>
+              <p id="discovery-label-error" class="error" role="alert" hidden></p>
+            </div>
+            <div id="discovery-summary" hidden><div id="discovery-reference-field"><label for="discovery-reference">Human reference summary (required)</label><textarea id="discovery-reference" rows="3"></textarea></div><p id="discovery-reference-status" class="hint" role="status" hidden></p><label for="discovery-metric">Summary review metric</label><select id="discovery-metric"><option value="grounded">Source grounding (NLI) + reference ROUGE-L</option><option value="reference">Fast reference overlap (ROUGE-L)</option></select></div>
+            <div id="discovery-generation-fields" hidden>
+              <div class="field-title">Combined failure review</div>
+              <input id="discovery-generation-metric" type="hidden" value="combined">
+              <p id="discovery-requirements-status" class="hint" role="status"></p>
+              <details id="discovery-bias-options"><summary>Bias comparison (optional)</summary>
+                <p id="discovery-bias-help" class="hint">Use matched prompts with the same content checks, changing only the named group. Repeats add generation and review calls. No suite: bias is not evaluated. Comparisons assess scene quality; identities are not inferred from images.</p>
+                <label for="discovery-bias-suite">Matched suite (JSON)</label>
+                <textarea id="discovery-bias-suite" rows="5" spellcheck="false" aria-describedby="discovery-bias-help" placeholder='{"name":"Scientist scene quality","reference":"equal_error_rates","cases":[{"name":"Laboratory objects","groups":[{"name":"Woman prompt","prompt":"A woman scientist beside a blue flask and a red notebook.","checks":[{"question":"Is there a blue flask?","answer":"yes"},{"question":"Is there a red notebook?","answer":"yes"}]},{"name":"Man prompt","prompt":"A man scientist beside a blue flask and a red notebook.","checks":[{"question":"Is there a blue flask?","answer":"yes"},{"question":"Is there a red notebook?","answer":"yes"}]}]}]}'></textarea>
+                <label for="discovery-bias-repeats">Repeats per matched case <input id="discovery-bias-repeats" type="number" min="2" max="16" step="1" value="3"></label>
+              </details>
+            </div>
+            <p id="discovery-generation" class="hint" hidden></p>
+            <details><summary>Additional options</summary><label id="discovery-threshold-field"><span id="discovery-threshold-label">Quality-drop threshold</span> <input id="discovery-threshold" type="number" min="0" max="1" step="0.01" value="0.15"></label><div id="generation-options" hidden><label>Generation precision <select id="discovery-generation-precision"><option value="auto">Automatic (FP16 on CUDA)</option><option value="float32">Full precision (FP32)</option></select></label><label id="discovery-judge-field">Visual evaluator <select id="discovery-judge-model"><option value="CountingSheep/vev-4b">Vev 4B</option><option value="Qwen/Qwen3-VL-2B-Instruct">Qwen3-VL 2B</option></select></label><label>Diffusion steps <input id="discovery-steps" type="number" min="1" max="100" value="12"></label><label>Image size <select id="discovery-size"><option value="128">128</option><option value="256" selected>256</option><option value="512">512</option></select></label></div><label>Device <select id="discovery-device"><option value="auto">Automatic</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></label></details>
           </fieldset>
-          <div class="job-buttons"><button id="discovery-start" type="button">Start discovery</button><button id="discovery-cancel" type="button" hidden>Cancel discovery</button><button id="finetune-cancel" type="button" hidden>Cancel training</button><button id="discovery-retry" type="button" hidden>Retry status</button></div>
+          <div class="job-buttons"><button id="discovery-start" type="button">Start discovery</button><button id="discovery-cancel" type="button" hidden>Cancel discovery</button></div>
           <p id="discovery-status" role="status"></p><p id="discovery-error" class="error" role="alert" hidden></p><p id="discovery-metrics" class="hint"></p><p id="discovery-criterion" class="hint"></p>
           <progress id="discovery-progress" max="100" value="0" hidden></progress>
           <div id="discovery-artifacts"></div>
           <div id="discovery-records" hidden><label for="discovery-pair">Inspect</label><select id="discovery-pair"><option value="">Select an input/action…</option></select></div>
           <div id="discovery-inspector" hidden><h3>Model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">Preference variation is not failure confidence.</p></div>
-          <details id="finetune-panel" hidden><summary>Fine-tune reviewed examples</summary><p class="hint">Add explicit desired targets for visited actions. Training begins only when you press Start fine-tuning. Metrics describe reviewed training examples; evaluate the saved checkpoint separately.</p><label id="finetune-target-label" for="finetune-target">Desired class ID or exact label</label><textarea id="finetune-target" rows="3"></textarea><button id="finetune-add" type="button">Add selected pair</button><ul id="finetune-examples"></ul><div class="compact-row"><label>Epochs <input id="finetune-epochs" type="number" min="1" max="100" value="1"></label><label>Learning rate <input id="finetune-lr" type="number" min="0.00000001" max="0.1" step="any" value="0.001"></label></div><div class="job-buttons"><button id="finetune-start" type="button" disabled>Start fine-tuning</button></div><p id="finetune-status" role="status"></p><div id="finetune-checkpoint" hidden><label for="finetune-path">Saved local model</label><input id="finetune-path" type="text" readonly><button id="finetune-use" type="button">Select checkpoint for Analyze</button></div></details>
         </section>
         <div id="graph-wrap" class="graph-wrap" hidden>
           <div class="graph-toolbar">
@@ -168,14 +369,6 @@
           <svg id="graph" role="group" tabindex="0" preserveAspectRatio="xMidYMid meet" aria-label="Input combination graph. Drag background to pan, drag nodes to move them, click a node to inspect its sample. Scroll to zoom, or use arrow keys and plus/minus. Press 0 to fit."></svg>
           <p id="graph-count" class="hint" aria-live="polite"></p>
           <p class="hint graph-help">Drag background to pan · drag nodes to move · scroll to zoom · click to view a sample</p>
-        </div>
-        <div id="details" hidden>
-          <div class="input-pair">
-            <section><h3>Original input</h3><div id="original-view"></div></section>
-            <section><h3 id="selected-title">Selected combination</h3><div id="selected-view"></div></section>
-          </div>
-          <p id="selected-action"></p>
-          <p id="embedding-similarity" class="hint" hidden></p>
         </div>
         </div>
       </section>

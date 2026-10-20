@@ -39,6 +39,7 @@ class LiveExpansionTests(unittest.TestCase):
                         operation_lock.release()
 
             class Encoder:
+                class_labels = {0: 'fixture'}
                 def __init__(self, model):
                     pass
 
@@ -48,6 +49,9 @@ class LiveExpansionTests(unittest.TestCase):
                                          for value in values], dtype=float)
 
             class Evaluator:
+                def resolve_label(self, value):
+                    return int(value)
+
                 def predict(self, value, **kwargs):
                     with model_operation():
                         entered.set()
@@ -88,7 +92,8 @@ class LiveExpansionTests(unittest.TestCase):
             wait(lambda: previews.get(preview['id']), done)
             analysis = embeddings.start(preview['id'], device='cpu')
             wait(lambda: embeddings.get(analysis['id']), done)
-            search = discovery.start(dict(embedding_id=analysis['id'], episodes=10000, device='cpu'))
+            search = discovery.start(dict(embedding_id=analysis['id'], episodes=10000, device='cpu',
+                                          label_map={'0': 0, '1': 0, '2': 0}))
             try:
                 self.assertTrue(entered.wait(5), 'Discovery must enter real model execution')
                 expansion = embeddings.expand(analysis['id'], 0)

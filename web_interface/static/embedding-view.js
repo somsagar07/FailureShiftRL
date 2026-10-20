@@ -13,6 +13,7 @@ class EmbeddingView {
     this.nodes = [];
     this.focusIndex = null;
     this.selectedAction = null;
+    this.adaptationActions = new Set();
     this.projected = [];
     this.center = [0, 0, 0];
     this.scale = 1;
@@ -55,11 +56,13 @@ class EmbeddingView {
     if (this.drag) this.endPointer({type: 'pointercancel', pointerId: this.drag.id});
     this.canvas.title = '';
     this.discovery=null;this.measured=new Map();this.severities=new Map();
+    this.landscapeMode='predicted';this.predictions=null;this.predictedActions=new Map();
     this.actionStatistics=new Map();this.actionRadii=new Map();
     this.points = points;
     this.nodes = [];
     this.focusIndex = null;
     this.selectedAction = null;
+    this.adaptationActions.clear();
     this.yaw = this.pitch = 0;
     this.fit();
   }
@@ -85,6 +88,13 @@ class EmbeddingView {
     this.render();
   }
 
+  setAdaptation(actionIds) {
+    // Adaptation selects action combinations globally, across all inputs.
+    this.adaptationActions = new Set(actionIds || []);
+    this.canvas.title = '';
+    this.render();
+  }
+
   clearFocus() {
     this.focusIndex = null;
     this.selectedAction = null;
@@ -93,6 +103,9 @@ class EmbeddingView {
   }
 
   setDiscovery(job) {
+    if(job?.id!==this.discovery?.id||job?.predicted_landscape?.policy_updates!==this.discovery?.predicted_landscape?.policy_updates) {
+      this.predictions=null;this.predictedActions.clear();
+    }
     this.discovery=job;
     this.measured=new Map();this.severities=new Map();
     const statistics=job?.policy_statistics;
@@ -124,6 +137,38 @@ class EmbeddingView {
     if(!Number.isFinite(value))return '#9aa1a9';
     const severity=Math.max(0,Math.min(1,value));
     return `rgb(${Math.round(47+166*severity)},${Math.round(158-107*severity)},${Math.round(88-36*severity)})`;
+  }
+
+  setLandscapeMode(mode) {
+    if(!['predicted','measured'].includes(mode))return;
+    this.landscapeMode=mode;this.canvas.title='';this.render();
+  }
+
+  setPredictions(predictions) {
+    if(predictions?.discovery_id!==this.discovery?.id||
+       predictions?.policy_updates!==this.discovery?.predicted_landscape?.policy_updates)return;
+    this.predictions=predictions;
+    this.predictedActions=new Map(predictions.actions.map(action=>[action.action_id,action]));
+    this.render();
+  }
+
+  prediction(index,action) {
+    return this.predictions?.input_index===index?this.predictedActions.get(action):null;
+  }
+
+  nodeColor(node) {
+    if(!this.discovery)return node.kind==='sample'?'#336aa3':'#b06c36';
+    const value=this.landscapeMode==='predicted'?
+      (node.kind==='sample'?this.discovery.predicted_landscape?.input_mean_reward[node.data.index]:this.prediction(this.focusIndex,node.data.id)?.q_value):
+      (node.kind==='sample'?this.severities.get(node.data.index):this.measured.get(`${this.focusIndex}:${node.data.id}`));
+    return this.severityColor(value);
+  }
+
+  predictionHint(index,action=null) {
+    if(!this.discovery)return '';
+    const value=action===null?this.discovery.predicted_landscape?.input_mean_reward[index]:this.prediction(index,action)?.q_value;
+    const measured=action===null?this.severities.has(index):this.measured.has(`${index}:${action}`);
+    return ` · ${action===null?'mean predicted reward':'predicted reward'}: ${Number.isFinite(value)?value.toPrecision(3):'unavailable'} · ${measured?(action===null?'some actions tested':'tested'):'estimated only'}`;
   }
 
   policyHint(id) {
@@ -180,8 +225,8 @@ class EmbeddingView {
     if (!drag) {
       const point = this.pick(event);
       this.canvas.style.cursor = point ? 'pointer' : 'grab';
-      this.canvas.title = !point ? '' : point.kind === 'sample' ? point.data.name :
-        `${Object.entries(point.data.action).map(([key, value]) => `${key}: ${value}`).join(', ')} · cosine similarity: ${point.data.similarity.toFixed(3)}${this.policyHint(point.data.id)}`;
+      this.canvas.title = !point ? '' : point.kind === 'sample' ? point.data.name+this.predictionHint(point.data.index) :
+        `${Object.entries(point.data.action).map(([key, value]) => `${key}: ${value}`).join(', ')} · cosine similarity: ${point.data.similarity.toFixed(3)}${this.predictionHint(this.focusIndex,point.data.id)}${this.policyHint(point.data.id)}${this.adaptationActions.has(point.data.id) ? ' · Selected for adaptation' : ''}`;
       return;
     }
     if (drag.id !== event.pointerId) return;
@@ -320,7 +365,7 @@ class EmbeddingView {
     for (const node of this.projected) {
       ctx.beginPath();
       ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-      ctx.fillStyle = this.discovery?this.severityColor(node.kind==='sample'?this.severities.get(node.data.index):this.measured.get(`${this.focusIndex}:${node.data.id}`)):(node.kind === 'sample' ? '#336aa3' : '#b06c36');
+      ctx.fillStyle = this.nodeColor(node);
       ctx.globalAlpha = this.focusIndex !== null && node.kind === 'sample' && !node.focused ? 0.22 : 1;
       ctx.fill();
       // Keep the missing-SD boundary visible even when selected or pulsing.
@@ -331,6 +376,13 @@ class EmbeddingView {
       ctx.setLineDash(unknownVariation ? [2, 2] : []);
       ctx.stroke();
       ctx.setLineDash([]);
+      if(this.landscapeMode==='predicted'&&this.discovery?.predicted_landscape) {
+        const tested=node.kind==='sample'?this.severities.has(node.data.index):this.measured.has(`${this.focusIndex}:${node.data.id}`);
+        // Evidence and missing variation have separate rings so a one-input
+        // workspace can show both estimated/tested and unavailable SD.
+        ctx.beginPath();ctx.arc(node.x,node.y,node.radius+1.7,0,Math.PI*2);
+        ctx.strokeStyle='#64748b';ctx.lineWidth=1;ctx.setLineDash(tested?[]:[4,3]);ctx.stroke();ctx.setLineDash([]);
+      }
       if (node.selected && node.kind === 'action') {
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius + 3.5, 0, Math.PI * 2);
@@ -346,7 +398,17 @@ class EmbeddingView {
         ctx.beginPath();ctx.arc(node.x,node.y,node.radius+pulse,0,Math.PI*2);
         ctx.strokeStyle='#203f72';ctx.lineWidth=2;ctx.globalAlpha=0.85;ctx.stroke();
       }
+      if (node.kind === 'action' && this.adaptationActions.has(node.data.id)) {
+        // Keep a gap beyond the inspected-action ring and the full live pulse.
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius + (active ? 13 : 7), 0, Math.PI * 2);
+        ctx.strokeStyle = '#dc2626';
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 1;
+        ctx.stroke();
+      }
     }
     ctx.globalAlpha = 1;
+    this.onRender?.();
   }
 }

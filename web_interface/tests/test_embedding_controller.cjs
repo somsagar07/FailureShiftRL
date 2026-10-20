@@ -54,6 +54,9 @@ const watchdog=setTimeout(()=>{console.error('Controller workflow did not finish
   assert.equal(explorer.view.points.length,2,'all original images appear before expanding any');
   assert.equal(explorer.view.index,null);
   assert.equal(get('embedding-wrap').hidden,false);
+  assert.equal(get('analysis-report').href,'/api/embeddings/embedding');
+  assert.equal(get('analysis-report').target,'_blank');
+  assert.match(get('analysis-report').rel,/noopener/);
   assert.equal(busy,false);
   const old=explorer.focus(0);
   assert.equal(explorer.view.index,0,'the selected image is focused immediately while actions compute');
@@ -85,7 +88,7 @@ const watchdog=setTimeout(()=>{console.error('Controller workflow did not finish
   assert.equal(calls.length,beforeLive+1,'already computed action embeddings stay inspectable without new model calls');
   assert.equal(explorer.view.nodes[0].image,action(1).image);
   explorer.focusMeasured(0,4);assert.equal(calls.length,beforeLive+1,'measured pair selection never runs inference');
-  assert.equal(explorer.view.index,0);assert.equal(inspected[0].image,points[0].image);
+  assert.equal(explorer.view.index,0);assert.equal(inspected[0],null,'an unavailable transformed input cannot be previewed as the original');
   explorer.isDiscoveryActive=()=>false;
   deferNextEmbedding=true;const pending=explorer.load(preview);
   explorer.reset();resolveEmbedding(job);await pending;
@@ -146,6 +149,30 @@ const watchdog=setTimeout(()=>{console.error('Controller workflow did not finish
     explorer.clearFocus();
     assert.match(status,/input/i);
   }
+  const datasetSources=[0,1].map(index=>({index,name:`Article ${index+1}`,text:`Complete article ${index+1}. ${'More source material. '.repeat(30)}`,reference_summary:`Reference ${index+1}.`,text_is_snippet:false}));
+  const summaryPreview={id:'summary-preview',config:{task:'summarization',dataset_id:'articles',model:{name:'test/summary'}},dataset:{id:'articles',count:2}};
+  const datasetJob={id:'summary-embedding',task:'summarization',status:'completed',feature_dim:8,projection:{variance:1},points:datasetSources.map(source=>({...source,text:'Truncated snippet',text_is_snippet:true,position:[source.index,0,0]}))};
+  const summaryCalls=[];let resolveOldArticle;
+  explorer.api=async(url,body)=>{
+    summaryCalls.push({url,body});if(url==='/api/embeddings')return datasetJob;
+    const source=datasetSources[body.input_index];
+    return {id:`summary-expansion-${source.index}`,status:'completed',input_index:source.index,original:source,nodes:[{id:0,text:source.text.toLowerCase(),action:{name:'to_lowercase'},similarity:.9,position:[0,1,0]}]};
+  };
+  explorer.onSelectInput=index=>{selectedIndex=index;return index===0?new Promise(resolve=>{resolveOldArticle=()=>resolve(datasetSources[0]);}):datasetSources[index];};
+  await explorer.load(summaryPreview);
+  assert.equal(summaryCalls.length,1,'a summary dataset opens its original-point overview without expanding one article');
+  assert.equal(explorer.view.points.length,2);assert.equal(explorer.view.index,null);
+  await explorer.focus(0);assert.equal(inspected[0].text,datasetSources[0].text,'expanded original text replaces the point snippet');
+  await explorer.focus(1);resolveOldArticle();await Promise.resolve();await Promise.resolve();
+  assert.equal(selectedIndex,1);assert.equal(inspected[0].reference_summary,'Reference 2.','a delayed article cannot replace the selected row');
+  get('embedding-action').value='0';get('embedding-action').events.change();
+  assert.equal(inspected[0].text,datasetSources[1].text);assert.equal(inspected[1].text,datasetSources[1].text.toLowerCase());
+  explorer.expansionCache.clear();explorer.originalCache.clear();
+  explorer.measuredCache.set(1,new Map([[0,{id:0,text:'Measured variant.',action:{name:'to_lowercase'},position:[0,1,0]}]]));
+  explorer.focusMeasured(1,0);await Promise.resolve();await Promise.resolve();
+  assert.equal(inspected[0].text,datasetSources[1].text,'measured-only inspection hydrates its full original from the selected-row endpoint');
+  assert.equal(inspected[1].text,'Measured variant.');
+  console.log('PASS: summary datasets keep an N-point overview and pair full originals/references with expanded and measured variants');
   console.log('PASS: dataset overview, focus/expansion, action inspector, collapse, stale responses and model errors');
   console.log('PASS: text domains focus their input, label encoder and PCA population, and preserve text/cosine selection');
   console.log('PASS: selected Analyze device, actual device/timings, cached stages and stale result clearing');

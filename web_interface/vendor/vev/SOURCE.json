@@ -1,0 +1,42 @@
+{
+  "repository": "Xiaooolong/vev",
+  "revision": "2d8c403b1c8459d34be214d76c19e0b158a1979c",
+  "files": {
+    "LICENSE": {
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/LICENSE"
+    },
+    "NOTICE": {
+      "sha256": "adadb12351d3ab0268fea9d58470bbf60cdbb18904abf66a4533317924f24644",
+      "bytes": 300,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/NOTICE"
+    },
+    "vev/__init__.py": {
+      "sha256": "8d6d3398990da2e72c1c450c17d722c94f3843e074d3e0afeea5e3da64b607bf",
+      "bytes": 131,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/vev/__init__.py"
+    },
+    "vev/model.py": {
+      "sha256": "04b561ccd7532e25db9f12aa333ea3722d43801d999db0c1560f385777993be0",
+      "bytes": 27288,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/vev/model.py"
+    },
+    "vev/readout.py": {
+      "sha256": "fa75e4d0764a6137e541438e87cfa076ec1e343baf223ffbce3f4056ff4f81ec",
+      "bytes": 10359,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/vev/readout.py"
+    },
+    "vev/state.py": {
+      "sha256": "5c1c13185d2bae465a478dfab85efe78016c061135c85fd8d7a8c846df7454d9",
+      "bytes": 6196,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/vev/state.py"
+    },
+    "vev/tokens.py": {
+      "sha256": "d8de41283cd51650c95ca8e346748c2a59af0ea8ebcc488a9c58f8337a2014f0",
+      "bytes": 790,
+      "url": "https://raw.githubusercontent.com/Xiaooolong/vev/2d8c403b1c8459d34be214d76c19e0b158a1979c/vev/tokens.py"
+    }
+  },
+  "scope": "Inference sources and license notices only; no weights."
+}

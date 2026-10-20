@@ -48,7 +48,7 @@ class HTTPTests(unittest.TestCase):
         raw_headers, raw_body = conn.output.split(b'\r\n\r\n', 1)
         return int(raw_headers.split()[1]), raw_body
     def test_page_assets_and_catalog(self):
-        for path in ['/', '/app.js', '/graph.js', '/embedding-view.js', '/embedding-controller.js', '/style.css', '/api/catalog']:
+        for path in ['/', '/app.js', '/graph.js', '/embedding-view.js', '/embedding-controller.js', '/adaptation-controller.js', '/discovery-controller.js', '/style.css', '/api/catalog']:
             with self.subTest(path=path):
                 code, body = self.request(path)
                 self.assertEqual(code, 200)
@@ -198,7 +198,7 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(job['status'], 'completed', job.get('error'))
             return job
 
-        for task, count in (('summarization', 14), ('generation', 27)):
+        for task, count in (('summarization', 14), ('generation', 125)):
             with self.subTest(task=task):
                 config = {'task': task, 'model': {'source': 'huggingface', 'name': 'test/text-model'}}
                 code, body = self.request('/api/previews', 'POST', body=config)

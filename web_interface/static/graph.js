@@ -108,7 +108,7 @@ class CombinationGraph {
     const dimension=this.groupBy;
     const groups=new Map();
     for(const node of this.data) {
-      const label=this.task==='classification'?(dimension?`${dimensions[dimension]} ${node.action[dimension]}${dimension==='rotation'?'°':''}`:'Combinations'):this.task==='generation'?node.action.description:'Text edits';
+      const label=this.task==='classification'?(dimension?`${dimensions[dimension]} ${node.action[dimension]}${dimension==='rotation'?'°':''}`:'Combinations'):this.task==='generation'?this.describe(node.action):'Text edits';
       if(!groups.has(label))groups.set(label,[]);
       groups.get(label).push(node);
     }
@@ -129,7 +129,7 @@ class CombinationGraph {
         const angle=index*Math.PI*(3-Math.sqrt(5));
         const radius=groups.size===1?80+14*Math.sqrt(index):19*Math.sqrt(index+.5);
         const node={data,id:String(data.id),x:center.x+Math.cos(angle)*radius,y:center.y+Math.sin(angle)*radius,color,visible:true};
-        node.description=`Combination ${data.id+1}: ${this.describe(data.action)}`;
+        node.description=`${this.task==='generation'?`Action ${data.id}`:`Combination ${data.id+1}`}: ${this.describe(data.action)}`;
         node.edge=this.svgElement('line',{x1:0,y1:0,x2:node.x,y2:node.y,stroke:color,class:'edge'});
         edges.append(node.edge);node.element=this.makeNode(node);nodes.append(node.element);
         this.combinations.push(node);group.nodes.push(node);
@@ -148,7 +148,7 @@ class CombinationGraph {
     const root=node.id==='original';
     const group=this.svgElement('g',{class:`graph-node${root?' original-node':''}`,role:'button',tabindex:0,'aria-label':node.description,'aria-pressed':'false','data-node':node.id,transform:`translate(${node.x} ${node.y})`});
     group.append(this.svgElement('title',{},node.description),this.svgElement('circle',{r:root?18:10,fill:node.color}));
-    group.append(this.svgElement('text',{x:0,y:root?36:3.5,class:root?'root-label':'node-label'},root?'Original':node.data.id+1));
+    group.append(this.svgElement('text',{x:0,y:root?36:3.5,class:root?'root-label':'node-label'},root?'Original':node.data.id+(this.task==='generation'?0:1)));
     group.addEventListener('click',event=>{if(!event?.detail||!this.suppressClick)this.activate(node);});
     group.addEventListener('keydown',event=>{
       if(event.key==='Enter'||event.key===' '){event.preventDefault();this.activate(node);}
@@ -171,7 +171,7 @@ class CombinationGraph {
     const query=this.control('graph-search').value.trim().toLowerCase();
     const number=/^#?\d+$/.test(query)?Number(query.replace('#','')):null;
     for(const node of this.combinations) {
-      node.visible=!query||(number!==null?node.data.id+1===number:node.description.toLowerCase().includes(query));
+      node.visible=!query||(number!==null?node.data.id+(this.task==='generation'?0:1)===number:node.description.toLowerCase().includes(query));
       for(const element of [node.element,node.edge])element.setAttribute('display',node.visible?'inline':'none');
     }
     for(const group of this.groups||[])group.element.setAttribute('display',group.nodes.some(node=>node.visible)?'inline':'none');

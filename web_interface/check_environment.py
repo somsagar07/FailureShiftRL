@@ -1,7 +1,8 @@
 """Check the imports actually needed by the local interface, without downloading data."""
 import argparse
 import importlib
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, requires as package_requirements, version
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -51,7 +52,7 @@ def nvidia_capabilities():
 def installed_torch():
     try:
         torch = importlib.import_module('torch')
-        current = {'version': torch.__version__, 'cuda': torch.version.cuda,
+        current = {'version': torch.__version__, 'package_version': version('torch'), 'cuda': torch.version.cuda,
                    'available': False}
         if torch.version.cuda and torch.cuda.is_available():
             try:
@@ -128,6 +129,65 @@ def plan_torch_install(mode, current, drivers):
             'reason': f'Installing {backend.upper()} PyTorch from the official {wheel} wheel index.'}
 
 
+def installed_torchvision():
+    """Keep distribution metadata even when a mismatched compiled wheel cannot import."""
+    try:
+        current = dict(version=version('torchvision'), available=False, torch_version=None)
+        for requirement in package_requirements('torchvision') or ():
+            match = re.match(r'^torch\s*\(?\s*==\s*([0-9][^;,\s)]+)', requirement)
+            if match:
+                current['torch_version'] = match[1].split('+', 1)[0]
+    except PackageNotFoundError:
+        return None
+    try:
+        loaded = importlib.import_module('torchvision')
+        getattr(importlib.import_module('torchvision.transforms.v2'), 'ToImage')
+    except Exception:
+        pass
+    else:
+        current['package_version'] = current['version']
+        current['version'] = loaded.__version__
+        current['available'] = True
+    return current
+
+
+def plan_torchvision_install(current, vision=None):
+    """Resolve vision on Torch's own wheel index while pinning the installed Torch."""
+    if not current or not supported_torch(current['version']):
+        raise RuntimeError('Install supported PyTorch before planning its torchvision wheel.')
+    cuda = current.get('cuda')
+    if cuda and not re.fullmatch(r'\d+\.\d+', cuda):
+        raise RuntimeError('Cannot determine a torchvision wheel index for this CUDA build.')
+    wheel = 'cu' + cuda.replace('.', '') if cuda else 'cpu'
+    release, _, local = current['version'].partition('+')
+    if local and local != wheel:
+        raise RuntimeError(f'PyTorch build {current["version"]} needs a matching torchvision wheel; '
+                           'install that wheel manually before running setup.')
+    suffix = '' if wheel == 'cpu' and sys.platform == 'darwin' else '+' + wheel
+    plan = dict(install=True, reinstall=False, requirement='torchvision>=0.21,<1',
+                index_url=f'https://download.pytorch.org/whl/{wheel}',
+                torch_requirement='torch==' + current.get('package_version', current['version']))
+    if vision and vision.get('torch_version') == release:
+        vision_release = vision['version'].split('+', 1)[0]
+        match = re.fullmatch(r'(\d+)\.(\d+)\.\d+', vision_release)
+        if match and (0, 21) <= tuple(map(int, match.groups())) < (1, 0):
+            plan['requirement'] = 'torchvision==' + vision_release + suffix
+            same_build = vision['version'] == vision_release + suffix
+            plan['install'] = not (same_build and vision['available'])
+            plan['reinstall'] = same_build and not vision['available']
+            if not plan['install']:
+                plan['requirement'] = 'torchvision==' + vision.get('package_version', vision['version'])
+    action = 'Keeping' if not plan['install'] else 'Repairing' if plan['reinstall'] else 'Installing'
+    plan['reason'] = (f'{action} torchvision for PyTorch {current["version"]} from the official {wheel} '
+                      'wheel index; the Torch version stays pinned.')
+    return plan
+
+
+def _vision_plan_fields(plan):
+    return ('reinstall' if plan['reinstall'] else 'install' if plan['install'] else 'keep',
+            plan['requirement'], plan['index_url'], plan['torch_requirement'])
+
+
 def check_torch_runtime(torch, require_cuda=False):
     """Exercise CUDA kernels and cuBLAS, not just the driver discovery API."""
     available = bool(torch.version.cuda and torch.cuda.is_available())
@@ -155,7 +215,8 @@ def check_environment(quiet=False, require_cuda=False):
         ('datasets', 'datasets', ('Image', 'Dataset', 'load_dataset')),
         ('numpy', 'numpy', ('linalg', 'array')),
         ('torch', 'torch', ('inference_mode', 'Tensor')),
-        ('transformers', 'transformers', ('AutoImageProcessor', 'AutoModel', 'AutoTokenizer', 'AutoModelForSeq2SeqLM', 'AutoModelForImageClassification', 'AutoModelForSequenceClassification', 'CLIPModel', 'CLIPTextModel', 'CLIPTokenizer')),
+        ('torchvision', 'torchvision', ('transforms', 'ops')),
+        ('transformers', 'transformers', ('AutoImageProcessor', 'AutoModel', 'AutoTokenizer', 'AutoModelForSeq2SeqLM', 'AutoModelForImageClassification', 'AutoModelForSequenceClassification', 'CLIPModel', 'CLIPTextModel', 'CLIPTokenizer', 'Qwen3VLProcessor', 'Qwen3VLForConditionalGeneration', 'BlipProcessor', 'BlipForQuestionAnswering')),
         ('sentencepiece', 'sentencepiece', ('SentencePieceProcessor',)),
         ('protobuf', 'google.protobuf', ('__version__',)),
         ('ftfy', 'ftfy', ('fix_text',)),
@@ -177,8 +238,10 @@ def check_environment(quiet=False, require_cuda=False):
                 if not supported_torch(installed):
                     raise ValueError('PyTorch >=2.6,<3 is required for weights-only loading.')
                 torch = loaded
-            if package == 'transformers' and not (4,55) <= tuple(map(int, installed.split('.')[:2])) < (5,0):
-                raise ValueError('This adapter requires Transformers >=4.55,<5.')
+            if package == 'torchvision' and not (0,21) <= tuple(map(int, installed.split('.')[:2])) < (1,0):
+                raise ValueError('This adapter requires torchvision >=0.21,<1.')
+            if package == 'transformers' and not (4,57) <= tuple(map(int, installed.split('.')[:2])) < (5,0):
+                raise ValueError('This adapter requires Transformers >=4.57,<5.')
         except Exception as exc:
             failures.append(package)
             if not quiet:
@@ -212,17 +275,52 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--quiet', action='store_true')
     parser.add_argument('--require-cuda', action='store_true', help='Fail unless a CUDA tensor operation succeeds.')
-    parser.add_argument('--setup-plan', choices=('auto', 'cpu', 'cuda'), help='Print the install plan used by setup.sh.')
+    planning = parser.add_mutually_exclusive_group()
+    planning.add_argument('--setup-plan', choices=('auto', 'cpu', 'cuda'), help='Print the install plan used by setup.sh.')
+    planning.add_argument('--vision-plan', action='store_true', help='Plan torchvision for the installed PyTorch build.')
+    planning.add_argument('--installed-constraints', action='store_true', help='Pin installed Torch and torchvision during app setup.')
     parser.add_argument('--fresh', action='store_true', help='Plan for a new virtual environment.')
     args = parser.parse_args()
     if args.setup_plan:
         try:
-            plan = plan_torch_install(args.setup_plan, None if args.fresh else installed_torch(), nvidia_drivers())
+            current = None if args.fresh else installed_torch()
+            plan = plan_torch_install(args.setup_plan, current, nvidia_drivers())
+            target = current
+            if plan['install']:
+                wheel = plan['index_url'].rsplit('/', 1)[1]
+                target = dict(version=plan['requirement'].removeprefix('torch=='),
+                              cuda=wheel[2:-1] + '.' + wheel[-1] if wheel.startswith('cu') else None)
+            vision = plan_torchvision_install(target, None if args.fresh else installed_torchvision())
         except (ValueError, RuntimeError) as exc:
             print(f'Setup cannot continue: {exc}', file=sys.stderr)
             raise SystemExit(1)
         print(plan['reason'], file=sys.stderr)
+        print(vision['reason'], file=sys.stderr)
         print('\t'.join((plan['backend'], 'install' if plan['install'] else 'keep',
-                         plan['requirement'], plan['index_url'])))
+                         plan['requirement'], plan['index_url'], *_vision_plan_fields(vision))))
         raise SystemExit(0)
-    raise SystemExit(check_environment(args.quiet, require_cuda=args.require_cuda))
+    if args.vision_plan or args.installed_constraints:
+        try:
+            if args.vision_plan:
+                plan = plan_torchvision_install(installed_torch(), installed_torchvision())
+                print(plan['reason'], file=sys.stderr)
+                print('\t'.join(_vision_plan_fields(plan)))
+            else:
+                for package in ('torch', 'torchvision'):
+                    print(f'{package}=={version(package)}')
+        except (ValueError, RuntimeError, PackageNotFoundError) as exc:
+            print(f'Setup cannot continue: {exc}', file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(0)
+    status = check_environment(args.quiet, require_cuda=args.require_cuda)
+    if status == 0:
+        command = [sys.executable, '-E', str(Path(__file__).with_name('setup_vev.py')), '--check']
+        if args.quiet:
+            command.append('--quiet')
+        try:
+            status = subprocess.run(command, timeout=150).returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            status = 1
+            if not args.quiet:
+                print(f'Vev runtime check failed: {exc}. Run bash setup.sh from web_interface.')
+    raise SystemExit(status)

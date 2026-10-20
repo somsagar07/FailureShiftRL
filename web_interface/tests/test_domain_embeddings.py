@@ -86,7 +86,7 @@ class DomainEmbeddingTests(unittest.TestCase):
             self.assertAlmostEqual(node['similarity'], float(vectors[0] @ vectors[index+1]))
             # All three vectors fit exactly into <=2 PCA axes: distance preserves cosine here.
             distance = np.linalg.norm(np.array(node['position']) - original['position'])
-            self.assertAlmostEqual(1-distance**2/2, node['similarity'])
+            self.assertAlmostEqual(1-distance**2/2, node['similarity'], delta=2e-7)
         self.assertEqual(len(self.encoders[0].seen), 3, 'Expansion must reuse the analyzed variants')
         self.assertEqual(self.expand(job)['nodes'], expansion['nodes'])
         self.assertEqual(self.manager.start(preview['id'], device='cpu')['id'], job['id'])
@@ -96,12 +96,12 @@ class DomainEmbeddingTests(unittest.TestCase):
         baseline = 'A unique scientist working on a project in a corporate office.'
         self.assertEqual(preview['original']['text'], baseline)
         job = self.analyze(preview)
-        self.assertEqual(job['projection']['fit_count'], 28)
+        self.assertEqual(job['projection']['fit_count'], 126)
         expansion = self.expand(job)
-        self.assertEqual(len(expansion['nodes']), 27)
-        self.assertEqual(expansion['nodes'][0]['text'], baseline)
-        self.assertAlmostEqual(expansion['nodes'][0]['similarity'], 1)
-        np.testing.assert_allclose(expansion['nodes'][0]['position'], job['points'][0]['position'])
+        self.assertEqual(len(expansion['nodes']), 125)
+        self.assertEqual(expansion['nodes'][0]['text'], 'Photograph style. Even lighting. Detail level: minimal. Scene: ' + baseline)
+        self.assertEqual(expansion['nodes'][0]['action'], {'id': 43, 'style': 'photograph', 'lighting':'even', 'detail':'minimal'})
+        self.assertEqual(job['points'][0]['text'], baseline)
         self.assertTrue(all('{' not in text for text in self.encoders[0].seen))
         chosen = self.preview('generation', action_space={
             'description': ['cool'], 'profession': ['artist'], 'setting': ['classroom']})

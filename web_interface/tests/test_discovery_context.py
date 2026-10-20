@@ -70,10 +70,38 @@ class DiscoveryContextTests(unittest.TestCase):
                 self.assertEqual(context['model']['revision'], 'a' * 40)
                 self.assertEqual(context['preview']['id'], job['preview_id'])
                 original = context['states'].copy()
-                context['states'][:] = 0
+                self.assertEqual(context['states'].dtype, np.float32)
+                self.assertFalse(context['states'].flags.writeable)
+                second = self.manager.discovery_context(job['id'])
+                self.assertTrue(np.shares_memory(context['states'], second['states']))
+                with self.assertRaises(ValueError):
+                    context['states'][:] = 0
                 context['job']['points'].clear()
                 np.testing.assert_array_equal(self.manager.discovery_context(job['id'])['states'], original)
                 self.assertTrue(self.manager.get(job['id'])['points'])
+
+    def test_release_skips_live_states_preserves_metadata_and_reanalyzes(self):
+        import gc
+        job = self.analyze('classification')
+        context = self.manager.discovery_context(job['id'])
+        self.assertEqual(self.manager.release_analysis(job['id'])['status'], 'busy')
+        del context
+        gc.collect()
+        result = self.manager.release_analysis(job['id'])
+        self.assertEqual(result['status'], 'released')
+        self.assertGreater(result['released_memory_bytes'], 0)
+        context = self.manager.discovery_context(job['id'], include_states=False)
+        self.assertNotIn('states', context)
+        self.assertEqual(context['job']['points'], job['points'])
+        with self.assertRaisesRegex(ValueError, '[Aa]nalyze.*again'):
+            self.manager.discovery_context(job['id'])
+        with self.assertRaisesRegex(ValueError, '[Aa]nalyze.*again'):
+            self.manager.expand(job['id'], 1)
+        rebuilt = self.manager.start(job['preview_id'], device=job['device'])
+        self.assertNotEqual(rebuilt['id'], job['id'])
+        rebuilt = self.wait(lambda: self.manager.get(rebuilt['id']))
+        self.assertFalse(rebuilt['features_reused'])
+        self.assertEqual(rebuilt['points'], job['points'])
 
     def test_context_refuses_a_replaced_local_checkpoint(self):
         self.assertTrue(callable(getattr(self.manager, 'discovery_context', None)))
@@ -85,6 +113,31 @@ class DiscoveryContextTests(unittest.TestCase):
         (model / 'new_weights.safetensors').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'changed'):
             self.manager.discovery_context(job['id'])
+
+    def test_metadata_only_context_and_cached_text_graph_survive_feature_release_in_all_domains(self):
+        for task in ('classification', 'summarization', 'generation'):
+            with self.subTest(task=task):
+                job = self.analyze(task)
+                before = self.manager.discovery_context(job['id'], include_states=False)
+                expansion = self.manager.expand(job['id'], 0)
+                expanded = self.wait(lambda: self.manager.get_expansion(job['id'], expansion['id']))
+                self.assertEqual(self.manager.release_analysis(job['id'])['status'], 'released')
+                after = self.manager.discovery_context(job['id'], include_states=False)
+                self.assertEqual(after['model'], before['model'])
+                self.assertEqual(after['job']['points'], before['job']['points'])
+                self.assertEqual(self.manager.expand(job['id'], 0)['nodes'], expanded['nodes'])
+                self.assertEqual(self.manager.discovery_node(job['id'], 0, expanded['nodes'][0]['id']),
+                                 expanded['nodes'][0])
+
+    def test_metadata_only_context_still_checks_local_checkpoint_after_release(self):
+        model = self.root/'model-after-release'
+        model.mkdir()
+        (model/'config.json').write_text('{}')
+        job = self.analyze('summarization', {'source': 'local', 'name': str(model)})
+        self.assertEqual(self.manager.release_analysis(job['id'])['status'], 'released')
+        (model/'weights.safetensors').write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            self.manager.discovery_context(job['id'], include_states=False)
 
     def test_model_lock_excludes_loading_and_release_preserves_cached_graph(self):
         self.assertTrue(hasattr(self.manager, 'model_lock'), 'Model execution needs a shared resource lock')

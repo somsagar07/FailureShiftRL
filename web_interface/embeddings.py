@@ -1,7 +1,6 @@
 """Selected-model input features and fixed PCA coordinates for each analysis."""
 import copy
 import hashlib
-import io
 import json
 import os
 import re
@@ -9,12 +8,15 @@ import threading
 import time
 import uuid
 from collections import deque
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from core import apply_image
+from classification_labels import match_dataset_labels
 from model_loading import configure_parallel_loading, prepare_analysis_model
 from text_encoders import _encoder_device
+from working_storage import FeatureStorage
 
 
 def _selection(model, task='classification'):
@@ -93,6 +95,7 @@ class HuggingFaceEncoder:
         except Exception as exc:
             raise ValueError(f'Could not load image model {selection["name"]}: {exc}') from exc
         self.revision = getattr(self.model.config, '_commit_hash', None)
+        self.class_labels = dict(getattr(self.model.config, 'id2label', {}) or {})
         self.feature_method = None
 
     def set_device(self, device):
@@ -148,7 +151,7 @@ class HuggingFaceEncoder:
             if self.feature_method is not None and self.feature_method != method:
                 raise ValueError('The model changed feature extraction methods between image batches.')
             self.feature_method = method
-            return features.detach().to(dtype=torch.float64, device='cpu').numpy()
+            return features.detach().to(dtype=torch.float32, device='cpu').numpy()
         except Exception as exc:
             raise ValueError(f'Image feature extraction failed for the selected model: {exc}') from exc
 
@@ -183,17 +186,39 @@ def _normalize(raw, count, dimension=None):
     if np.any(scale == 0):
         raise ValueError('The model returned a zero feature vector; cosine similarity is undefined.')
     scaled = features / scale
-    return scaled / np.linalg.norm(scaled, axis=1, keepdims=True)
+    return (scaled / np.linalg.norm(scaled, axis=1, keepdims=True)).astype(np.float32)
 
 
-def _pca(features):
+def _pca(features, batch_size=None):
     import numpy as np
-    mean = np.mean(features, axis=0)
-    centered = features - mean
-    _, singular, vectors = np.linalg.svd(centered, full_matrices=False)
-    # An absolute floor suppresses rounding residue from repeated identical rows.
-    tolerance = np.finfo(np.float64).eps * max(features.shape) * max(float(singular[0]), 1.0)
-    rank = int(np.count_nonzero(singular > tolerance))
+    epsilon = np.finfo(np.float64).eps
+    if batch_size is None:
+        mean = np.mean(features, axis=0, dtype=np.float64)
+        centered = features - mean
+        _, singular, vectors = np.linalg.svd(centered, full_matrices=False)
+        squared = singular ** 2
+        # An absolute floor suppresses rounding residue from identical rows.
+        tolerance = (epsilon * max(features.shape) * max(float(singular[0]), 1.0)) ** 2
+    else:
+        # Both passes read every original from the memmap. Shifting the mean
+        # sum avoids rounding drift for identical rows; directly centering each
+        # chunk avoids cancellation from subtracting two large Gram matrices.
+        origin = np.asarray(features[0], dtype=np.float64)
+        mean = np.zeros(features.shape[1], dtype=np.float64)
+        for offset in range(0, len(features), batch_size):
+            mean += np.sum(features[offset:offset+batch_size] - origin, axis=0)
+        mean = origin + mean / len(features)
+        covariance = np.zeros((features.shape[1], features.shape[1]), dtype=np.float64)
+        for offset in range(0, len(features), batch_size):
+            centered = features[offset:offset+batch_size] - mean
+            covariance += centered.T @ centered
+        del centered
+        eigenvalues, vectors = np.linalg.eigh(covariance)
+        squared = np.maximum(eigenvalues[::-1], 0)
+        vectors = vectors[:, ::-1].T
+        tolerance = max((epsilon * max(features.shape)) ** 2 * max(float(squared[0]), 1.0),
+                        epsilon * features.shape[1] * float(squared[0]))
+    rank = int(np.count_nonzero(squared > tolerance))
     components = np.zeros((3, features.shape[1]), dtype=np.float64)
     ratios = np.zeros(3, dtype=np.float64)
     retained = min(3, rank)
@@ -204,7 +229,7 @@ def _pca(features):
             pivot = int(np.argmax(np.round(np.abs(vector), decimals=12)))
             if vector[pivot] < 0:
                 vector *= -1
-        ratios[:retained] = singular[:retained] ** 2 / np.sum(singular ** 2)
+        ratios[:retained] = squared[:retained] / np.sum(squared)
     projection = {'method': 'PCA on L2-normalized original image features', 'rank': rank,
                   'variance': float(min(1.0, ratios.sum())), 'components': ratios.tolist()}
     return mean, components, projection
@@ -213,13 +238,19 @@ def _pca(features):
 class EmbeddingManager:
     """Serialize inference, retain session identities, and lazily expand selected inputs."""
     BATCH_SIZE = 8
-    # Exact SVD needs several arrays; fail clearly instead of silently sampling data.
+    CUDA_IMAGE_BATCH_SIZE = 64
+    IMAGE_WORKERS = 4
+    # Large image datasets retain all vectors on disk and fit covariance in
+    # chunks. This bounds working arrays for either solver without sampling.
     MAX_PCA_BYTES = 256 * 1024 * 1024
 
-    def __init__(self, previews, directory, encoder_factory=None, model_preparer=None):
+    def __init__(self, previews, directory, encoder_factory=None, model_preparer=None, *,
+                 feature_memory_bytes=None, feature_disk_bytes=None):
         self.previews = previews
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.storage = FeatureStorage(self.directory, memory_bytes=feature_memory_bytes,
+                                      disk_bytes=feature_disk_bytes)
         self.encoder_factory = encoder_factory or create_encoder
         # Injected factories may represent offline fixtures or external backends.
         # They control their own preparation unless an explicit preparer is given.
@@ -235,6 +266,7 @@ class EmbeddingManager:
         self._preview_jobs = {}
         self._bases = {}
         self._job_bases = {}
+        self._job_keys = {}
         self._expansion_cache = {}
         self._queue = deque()
         self._queued_at = {}
@@ -248,14 +280,19 @@ class EmbeddingManager:
         self._evaluator_identity = None
         self._discovery_nodes = {}
         self._revisions = {}
+        self._working_job_id = None
+        self._safe_batch_sizes = {}
 
     def get(self, job_id):
         with self.lock:
             return copy.deepcopy(self.jobs[job_id])
 
-    def discovery_context(self, job_id):
-        """Return immutable analysis identity and independent full-dimensional states."""
-        import numpy as np
+    def discovery_context(self, job_id, *, include_states=True):
+        """Return analysis identity and an optional leased, read-only feature view.
+
+        Metadata remains usable for Adapt after disposable working features are
+        released. Keeping any zero-copy states view alive prevents that release.
+        """
         with self.lock:
             job = copy.deepcopy(self.jobs[job_id])
             if job['status'] != 'completed':
@@ -267,12 +304,38 @@ class EmbeddingManager:
             revision = self._revisions.get(base['model_key'])
             if revision:
                 model['revision'] = revision
-            if job['task'] == 'classification':
-                states = np.array(np.load(base['path'], mmap_mode='r'), copy=True)
-            else:
-                states = base['states'].copy()
-            return dict(job=job, preview=self.previews.get(job['preview_id']),
-                        model=model, states=states, model_key=base['model_key'])
+            result = dict(job=job, preview=self.previews.get(job['preview_id']),
+                          model=model, model_key=base['model_key'])
+            if include_states:
+                result['states'] = base['buffer'].readonly(rows=len(job['points']))
+            return result
+
+    def release_analysis(self, job_id):
+        """Release only disposable owned features, skipping active/shared work."""
+        empty = dict(released_memory_bytes=0, released_disk_bytes=0)
+        if not self.model_lock.acquire(blocking=False):
+            return dict(status='busy', reason='Model work is in progress.', **empty)
+        try:
+            with self.lock:
+                job = self.jobs[job_id]
+                base = self._job_bases.get(job_id)
+                key = self._job_keys.get(job_id)
+                related = {identifier for identifier, other_key in self._job_keys.items() if other_key == key}
+                if (any(self.jobs[identifier]['status'] in ('queued', 'running') for identifier in related) or
+                        self._working_job_id in related or any(
+                            item['job_id'] in related and item['status'] in ('queued', 'running')
+                            for item in self.expansions.values())):
+                    return dict(status='busy', reason='Analysis or graph work is in progress.', **empty)
+                if base is None:
+                    return dict(status='already_released', **empty)
+                result = base['buffer'].release()
+                if base['buffer'].released:
+                    for identifier, other in self._job_bases.items():
+                        if other is base:
+                            self.jobs[identifier]['features_released'] = True
+                return result
+        finally:
+            self.model_lock.release()
 
     def release_encoder(self):
         """Invalidate all retained inference weights before training or a model switch."""
@@ -315,9 +378,14 @@ class EmbeddingManager:
             torch, _ = _dependencies()
             resources = {'device': _device(torch, config),
                          'summary_metric': config.get('summary_metric', 'reference')}
-            for name in ('_nli_model', '_clip_model'):
+            if selection['task'] == 'generation':
+                from generation_judge import DEFAULT_JUDGE
+                resources.update(generation_metric=config.get('generation_metric', 'combined'),
+                                 generation_precision=config.get('generation_precision', 'auto'),
+                                 judge_model=config.get('judge_model', DEFAULT_JUDGE))
+            for name in ('_nli_model', '_clip_model', '_judge_model'):
                 if config.get(name) is not None:
-                    scorer = _selection(config[name], 'summarization' if name == '_nli_model' else 'classification')
+                    scorer = _selection(config[name], 'classification' if name == '_clip_model' else 'summarization')
                     resources[name] = _model_key(scorer)
             resource_key = json.dumps(resources, sort_keys=True)
             key = (identity, resource_key)
@@ -350,7 +418,9 @@ class EmbeddingManager:
         import numpy as np
         with self.model_lock:
             with self.lock:
-                job = copy.deepcopy(self.jobs[job_id])
+                # Completed points are immutable. Copying the entire graph for
+                # every measured pair makes discovery quadratic in input count.
+                job = dict(self.jobs[job_id])
                 if job['status'] != 'completed':
                     raise ValueError('Finish Analyze before projecting discoveries.')
                 if type(input_index) is not int or not 0 <= input_index < len(job['points']):
@@ -371,14 +441,19 @@ class EmbeddingManager:
             entry = next((node for node in preview['nodes'] if node['id'] == action_id), None)
             if entry is None:
                 raise ValueError('Select an available action.')
-            if job['task'] != 'classification':
+            text_dataset = job['task'] in ('summarization', 'generation') and bool(job.get('dataset_id'))
+            if job['task'] != 'classification' and not text_dataset:
                 raise ValueError('The analyzed text variants are unavailable. Analyze again.')
+            features = base['buffer'].readonly()
             encoder = self._load_encoder(job['model'], base['model_key'], device=job['device'])
-            image = apply_image(self._original_image(job['preview_id'], input_index), entry['action'])
-            value = _normalize(self._encode_batch(encoder, [image]), 1, base['feature_dim'])[0]
-            features = np.load(base['path'], mmap_mode='r')
-            node = dict(id=entry['id'], action=entry['action'], image=entry['image'],
-                        position=((value-base['mean']) @ base['components'].T).tolist(),
+            value_input = entry['text'] if text_dataset else apply_image(
+                self._original_image(job['preview_id'], input_index), entry['action'])
+            labels = ([self._prompt_label(input_index, preview['input_name'], entry['action'])]
+                      if job['task'] == 'generation' else None)
+            value = _normalize(self._encode_batch(encoder, [value_input],
+                truncate=job['task'] == 'summarization', labels=labels), 1, base['feature_dim'])[0]
+            node = copy.deepcopy(entry)
+            node.update(position=((value-base['mean']) @ base['components'].T).tolist(),
                         similarity=float(np.clip(value @ features[input_index], -1, 1)),
                         neighbors=self._neighbors(features, value, job['points']))
             with self.lock:
@@ -410,13 +485,16 @@ class EmbeddingManager:
         if preview['status'] != 'completed':
             raise ValueError('Generate the input preview before computing embeddings.')
         model = _selection(preview['config']['model'], task)
-        dataset = self.previews.datasets.ready(preview['config']['dataset_id']) if task == 'classification' else None
+        dataset = self.previews.datasets.ready(preview['config']['dataset_id']) if preview['config'].get('dataset_id') else None
+        if dataset and dataset.get('task', 'classification') != task:
+            raise ValueError(f'Load a {task} dataset before analyzing this workspace.')
         model_key = _model_key(model)
         key = (dataset['id'] if dataset else preview_id, model_key, actual_device)
         preview_key = (preview_id, model_key, actual_device)
         with self.lock:
             existing = self._preview_jobs.get(preview_key)
-            if existing and self.jobs[existing]['status'] != 'error':
+            if (existing and self.jobs[existing]['status'] != 'error' and
+                    not self.jobs[existing].get('features_released')):
                 return self.get(existing)
             job_id = uuid.uuid4().hex
             total = dataset['count'] if dataset else 1+len(preview['nodes'])
@@ -426,7 +504,16 @@ class EmbeddingManager:
                                      timings_seconds=self._empty_timings(), queue_wait_seconds=0.0,
                                      model_reused=False, features_reused=False,
                                      status='queued', completed=0, total=total, phase='queued', points=[])
+            if dataset and task == 'summarization':
+                self.jobs[job_id]['references'] = dict(dataset_id=dataset['id'], total=dataset['count'],
+                    count=dataset.get('reference_count', 0), missing=dataset.get('missing_reference_count', dataset['count']),
+                    text_column=dataset.get('text_column'), summary_column=dataset.get('summary_column'))
+            elif dataset and task == 'generation':
+                self.jobs[job_id]['requirements'] = dict(dataset_id=dataset['id'], total=dataset['count'],
+                    count=dataset.get('checked_count', 0), missing=dataset.get('missing_checks_count', dataset['count']),
+                    prompt_column=dataset.get('prompt_column'), checks_column=dataset.get('checks_column'))
             self._preview_jobs[preview_key] = job_id
+            self._job_keys[job_id] = key
             self._enqueue(('overview', job_id, key))
             return self.get(job_id)
 
@@ -439,6 +526,9 @@ class EmbeddingManager:
                 raise ValueError('Input index is outside this embedding dataset.')
             if job['model']['source'] == 'local' and _model_key(job['model']) != self._job_bases[job_id]['model_key']:
                 raise ValueError('The local model changed after analysis. Analyze the input again.')
+            cached = self._expansion_cache.get((job_id, input_index))
+            if cached is None and self._job_bases[job_id]['buffer'].released:
+                raise ValueError('Analysis working features were released. Analyze the input again to expand uncached inputs.')
             if self._active_expansion:
                 active = self.expansions[self._active_expansion]
                 if active['status'] in ('queued', 'running'):
@@ -446,17 +536,21 @@ class EmbeddingManager:
                         return self.get_expansion(job_id, active['id'])
                     active.update(status='cancelled', phase='superseded', error='A newer input selection superseded this expansion.')
             preview = self.previews.get(job['preview_id'], input_index)
+            original = copy.deepcopy(job['points'][input_index])
+            if job['task'] in ('summarization', 'generation') and job.get('dataset_id'):
+                original.update(copy.deepcopy(preview['original']), text_is_snippet=False)
+                if job['task'] == 'summarization':
+                    original['reference_summary'] = preview.get('reference_summary')
             expansion_id = uuid.uuid4().hex
             result = dict(id=expansion_id, job_id=job_id, preview_id=job['preview_id'], input_index=input_index,
                           model=copy.deepcopy(job['model']), status='queued', completed=0,
                           requested_device=job['requested_device'], device=job['device'], device_name=job['device_name'],
                           timings_seconds=self._empty_timings(), queue_wait_seconds=0.0,
                           model_reused=False, features_reused=False,
-                          total=len(preview['nodes']), phase='queued', original=copy.deepcopy(job['points'][input_index]),
+                          total=len(preview['nodes']), phase='queued', original=original,
                           nodes=[], neighbors=[])
             self.expansions[expansion_id] = result
             self._active_expansion = expansion_id
-            cached = self._expansion_cache.get((job_id, input_index))
             if cached:
                 result.update(copy.deepcopy(cached), status='completed', phase='completed', features_reused=True)
             else:
@@ -507,17 +601,23 @@ class EmbeddingManager:
                         continue
                 error = None
                 try:
-                    if kind == 'overview':
-                        if record['task'] == 'classification':
-                            self._overview(identifier, key)
+                    with self.lock:
+                        self._working_job_id = identifier if kind == 'overview' else record['job_id']
+                    with self.previews.pin_preview(record['preview_id']):
+                        if kind == 'overview':
+                            if record['task'] == 'classification':
+                                self._overview(identifier, key)
+                            elif record.get('dataset_id'):
+                                self._text_dataset_overview(identifier, key)
+                            else:
+                                self._text_overview(identifier, key)
                         else:
-                            self._text_overview(identifier, key)
-                    else:
-                        self._expand(identifier)
+                            self._expand(identifier)
                 except Exception as exc:
                     error = str(exc)
                 finally:
                     with self.lock:
+                        self._working_job_id = None
                         record['timings_seconds']['total'] = time.perf_counter() - started
                         if record['status'] != 'cancelled':
                             if error is not None:
@@ -559,24 +659,48 @@ class EmbeddingManager:
             error = error.__cause__ or error.__context__
         return False
 
-    def _encode_batch(self, encoder, inputs):
+    @staticmethod
+    def _prompt_label(input_index, input_name, action=None):
+        label = f'Input {input_index+1} ({input_name})'
+        if action is not None:
+            name = ', '.join(f'{key}: {value}' for key, value in action.items() if key != 'id' and value is not None)
+            label += f', action {action["id"]} ({name})'
+        return label
+
+    def _encode_batch(self, encoder, inputs, *, truncate=False, labels=None):
+        import numpy as np
+        safe = self._safe_batch_sizes.get(id(encoder))
+        if safe is not None and len(inputs) > safe:
+            return np.concatenate([self._encode_batch(encoder, inputs[offset:offset+safe], truncate=truncate,
+                                   labels=labels[offset:offset+safe] if labels is not None else None)
+                                   for offset in range(0, len(inputs), safe)], axis=0)
         try:
-            return encoder.encode(inputs)
+            return encoder.encode(inputs, truncate=True) if truncate else encoder.encode(inputs)
         except Exception as exc:
             torch = getattr(encoder, 'torch', None)
             if (getattr(encoder, 'device', 'cpu') != 'cuda' or torch is None or
                     not self._is_cuda_oom(exc, torch)):
+                if labels:
+                    # Tokenizers report a batch-local input. Retain the actual
+                    # row/style identity, including after adaptive CUDA splits.
+                    match = re.search(r'Text input (\d+)\b', str(exc))
+                    index = int(match[1])-1 if match else None
+                    label = labels[index] if index is not None and 0 <= index < len(labels) else (
+                        labels[0] if len(labels) == 1 else f'{labels[0]} through {labels[-1]}')
+                    raise ValueError(f'{label}: {exc}') from exc
                 raise
             if len(inputs) == 1:
                 raise ValueError('CUDA ran out of memory for one input. Choose CPU, shorten text inputs, '
                                  'or use a smaller model before analyzing again.') from exc
         # Drop the failed call's traceback and tensors before retrying. Splits
         # preserve input order and stop at one input, without moving devices.
-        import numpy as np
         torch.cuda.empty_cache()
         middle = len(inputs) // 2
-        return np.concatenate((self._encode_batch(encoder, inputs[:middle]),
-                               self._encode_batch(encoder, inputs[middle:])), axis=0)
+        self._safe_batch_sizes[id(encoder)] = min(self._safe_batch_sizes.get(id(encoder), middle), middle)
+        return np.concatenate((self._encode_batch(encoder, inputs[:middle], truncate=truncate,
+                               labels=labels[:middle] if labels is not None else None),
+                               self._encode_batch(encoder, inputs[middle:], truncate=truncate,
+                               labels=labels[middle:] if labels is not None else None)), axis=0)
 
     def _load_encoder(self, model, key, device=None, record=None):
         device = device or model.get('device', 'cpu')
@@ -632,10 +756,18 @@ class EmbeddingManager:
                 record['model_reused'] = reused
         return self._encoder
 
-    def _check_pca_size(self, count, dimension):
+    def _check_pca_size(self, count, dimension, *, streamed=False):
         estimated_bytes = 8 * (3 * count * dimension + 3 * min(count, dimension) ** 2)
-        if estimated_bytes > self.MAX_PCA_BYTES:
-            raise ValueError('This input/model exceeds the 256 MB PCA working-array limit. Use fewer inputs/actions or a model with fewer feature dimensions.')
+        if estimated_bytes <= self.MAX_PCA_BYTES:
+            return None
+        if streamed:
+            # Reserve covariance/eigenvector/LAPACK workspace, the retained 3D
+            # positions, and small vectors before sizing one centered chunk.
+            reserved = 8 * (6 * dimension ** 2 + 10 * dimension + 3 * count)
+            rows = (self.MAX_PCA_BYTES - reserved) // (8 * dimension)
+            if rows >= 1:
+                return min(count, 1024, rows)
+        raise ValueError('This input/model exceeds the PCA working-array limit. Use fewer inputs/actions or a model with fewer feature dimensions.')
 
     def _text_overview(self, job_id, key):
         """One source needs its variants in the PCA fit to have meaningful axes."""
@@ -648,33 +780,128 @@ class EmbeddingManager:
         record = self.jobs[job_id]
         encoder = self._load_encoder(job['model'], key[1], device=job['device'], record=record)
         features = None
-        with self._stage(record, 'embedding', 'embedding input and action variants'):
-            for offset in range(0, len(entries), self.BATCH_SIZE):
-                texts = [entry['text'] for entry in entries[offset:offset+self.BATCH_SIZE]]
-                values = _normalize(self._encode_batch(encoder, texts), len(texts), None if features is None else features.shape[1])
-                if features is None:
-                    self._check_pca_size(len(entries), values.shape[1])
-                    features = np.empty((len(entries), values.shape[1]), dtype=np.float64)
-                features[offset:offset+len(texts)] = values
-                with self.lock:
-                    record['completed'] = offset+len(texts)
-        with self._stage(record, 'pca', 'fitting PCA'):
-            mean, components, projection = _pca(features)
-            projection.update(method='PCA on L2-normalized input and action variant features', fit_count=len(entries))
-            positions = (features-mean) @ components.T
-        point = dict(index=0, name=preview['input_name'], text=entries[0]['text'], position=positions[0].tolist())
-        nodes = []
-        for entry, value, position in zip(preview['nodes'], features[1:], positions[1:]):
-            node = copy.deepcopy(entry)
-            node.update(position=position.tolist(), similarity=float(np.clip(value @ features[0], -1, 1)),
-                        neighbors=self._neighbors(features[:1], value, [point]))
-            nodes.append(node)
+        buffer = None
+        try:
+            with self._stage(record, 'embedding', 'embedding input and action variants'):
+                for offset in range(0, len(entries), self.BATCH_SIZE):
+                    batch = entries[offset:offset+self.BATCH_SIZE]
+                    texts = [entry['text'] for entry in batch]
+                    labels = ([self._prompt_label(0, preview['input_name'], entry.get('action')) for entry in batch]
+                              if job['task'] == 'generation' else None)
+                    values = _normalize(self._encode_batch(encoder, texts, labels=labels), len(texts),
+                                        None if features is None else features.shape[1])
+                    if features is None:
+                        pca_batch_size = self._check_pca_size(len(entries), values.shape[1], streamed=True)
+                        buffer = self.storage.allocate((len(entries), values.shape[1]))
+                        features = buffer.array
+                    features[offset:offset+len(texts)] = values
+                    with self.lock:
+                        record['completed'] = offset+len(texts)
+            with self._stage(record, 'pca', 'fitting PCA'):
+                mean, components, projection = _pca(features, batch_size=pca_batch_size)
+                projection.update(method='PCA on L2-normalized input and action variant features', fit_count=len(entries))
+                positions = (features-mean) @ components.T
+            point = dict(index=0, name=preview['input_name'], text=entries[0]['text'], position=positions[0].tolist())
+            nodes = []
+            for entry, value, position in zip(preview['nodes'], features[1:], positions[1:]):
+                node = copy.deepcopy(entry)
+                node.update(position=position.tolist(), similarity=float(np.clip(value @ features[0], -1, 1)),
+                            neighbors=self._neighbors(features[:1], value, [point]))
+                nodes.append(node)
+            buffer.seal()
+        except Exception:
+            if buffer is not None:
+                buffer.release()
+            raise
         with self.lock:
-            self._job_bases[job_id] = {'model_key': key[1], 'states': features[:1].copy()}
+            self._job_bases[job_id] = {'model_key': key[1], 'buffer': buffer}
             self._expansion_cache[(job_id, 0)] = dict(nodes=nodes, completed=len(nodes), neighbors=[])
             self.jobs[job_id].update(completed=len(entries), points=[point],
                                      projection=projection, feature_dim=features.shape[1],
                                      feature_method=getattr(encoder, 'feature_method', 'model input features'))
+
+    def _text_dataset_overview(self, job_id, key):
+        """Fit dataset originals once; keep full texts and action graphs out of RAM."""
+        import numpy as np
+        job = self.get(job_id)
+        if job['model']['source'] == 'local' and _model_key(job['model']) != key[1]:
+            raise ValueError('The local model changed while embeddings were queued. Analyze the dataset again.')
+        base = self._bases.get(key)
+        if base is not None and base['buffer'].released:
+            base = None
+        created_base = base is None
+        record = self.jobs[job_id]
+        truncate = job['task'] == 'summarization'
+        input_kind = 'articles' if truncate else 'prompts'
+        if base is None:
+            encoder = self._load_encoder(job['model'], key[1], device=job['device'], record=record)
+            features = None
+            buffer = None
+            try:
+                with self._stage(record, 'embedding', f'embedding original {input_kind}'):
+                    for offset in range(0, job['total'], self.BATCH_SIZE):
+                        rows = [self.previews.datasets.text(job['dataset_id'], index)
+                                for index in range(offset, min(offset+self.BATCH_SIZE, job['total']))]
+                        texts = [row['text'] for row in rows]
+                        labels = ([self._prompt_label(offset+index, row['name']) for index, row in enumerate(rows)]
+                                  if not truncate else None)
+                        values = _normalize(self._encode_batch(encoder, texts, truncate=truncate, labels=labels), len(texts),
+                                            None if features is None else features.shape[1])
+                        if features is None:
+                            pca_batch_size = self._check_pca_size(job['total'], values.shape[1], streamed=True)
+                            buffer = self.storage.allocate((job['total'], values.shape[1]))
+                            features = buffer.array
+                        features[offset:offset+len(texts)] = values
+                        with self.lock:
+                            record['completed'] = offset+len(texts)
+                with self._stage(record, 'pca', f'fitting PCA on original {input_kind}'):
+                    mean, components, projection = _pca(features, batch_size=pca_batch_size)
+                    projection.update(method=f'PCA on L2-normalized original {input_kind[:-1]} features', fit_count=job['total'])
+                    positions = np.empty((len(features), 3), dtype=np.float64)
+                    for offset in range(0, len(features), pca_batch_size or 1024):
+                        stop = offset + (pca_batch_size or 1024)
+                        positions[offset:stop] = (features[offset:stop]-mean) @ components.T
+                buffer.seal()
+                base = dict(buffer=buffer, mean=mean, components=components, projection=projection,
+                            feature_dim=features.shape[1], feature_method=getattr(encoder, 'feature_method', 'model input features'),
+                            model_key=key[1], positions=positions,
+                            input_policy=dict(max_input_tokens=getattr(encoder, 'max_tokens', None), truncate=truncate,
+                                policy=('Truncate source inputs to the model token limit, including the task prefix and special tokens.'
+                                        if truncate else 'Require the full prompt and each style variant to fit the model token limit, including special tokens. Truncation is disabled.')))
+                del features
+            except Exception:
+                if features is not None:
+                    del features
+                if buffer is not None:
+                    buffer.release()
+                raise
+        else:
+            with self.lock:
+                record.update(features_reused=True, model_reused=self._encoder_key == (key[1], job['device']))
+        try:
+            points = []
+            for offset in range(0, job['total'], 100):
+                for item in self.previews.datasets.page(job['dataset_id'], offset, 100)['items']:
+                    point = dict(index=item['index'], name=item['name'], text=item['text_preview'], text_is_snippet=True,
+                                 position=base['positions'][item['index']].tolist())
+                    if truncate:
+                        point['has_reference'] = item['has_reference']
+                    else:
+                        point.update(has_checks=bool(item['check_count']), check_count=item['check_count'])
+                    for name in ('source_split', 'source_index'):
+                        if name in item:
+                            point[name] = item[name]
+                    points.append(point)
+        except Exception:
+            if created_base:
+                base['buffer'].release()
+            raise
+        with self.lock:
+            self._bases[key] = base
+            self._job_bases[job_id] = base
+            self.jobs[job_id].update(completed=job['total'], points=points, input_policy=copy.deepcopy(base['input_policy']),
+                                     projection=copy.deepcopy(base['projection']), feature_dim=base['feature_dim'],
+                                     feature_method=base['feature_method'])
 
     def _overview(self, job_id, key):
         import numpy as np
@@ -682,39 +909,48 @@ class EmbeddingManager:
         if job['model']['source'] == 'local' and _model_key(job['model']) != key[1]:
             raise ValueError('The local model changed while embeddings were queued. Reload the preview.')
         base = self._bases.get(key)
+        if base is not None and base['buffer'].released:
+            base = None
+        created_base = base is None
         record = self.jobs[job_id]
         if base is None:
             encoder = self._load_encoder(job['model'], key[1], device=job['device'], record=record)
-            path = self.directory/(uuid.uuid4().hex+'.npy')
             features = None
+            buffer = None
             digests = []
             try:
-                with self._stage(record, 'embedding', 'embedding originals'):
-                    for offset in range(0, job['total'], self.BATCH_SIZE):
-                        images = [self._original_image(job['preview_id'], index)
-                                  for index in range(offset, min(offset+self.BATCH_SIZE, job['total']))]
+                batch_size = self.CUDA_IMAGE_BATCH_SIZE if job['device'] == 'cuda' else self.BATCH_SIZE
+                with self._stage(record, 'embedding', 'embedding originals'), closing(
+                        self._image_batches(job['preview_id'], job['total'], batch_size)) as batches:
+                    for offset, images in batches:
                         digests.extend(hashlib.sha256(image.tobytes()).hexdigest() for image in images)
                         values = _normalize(self._encode_batch(encoder, images), len(images), None if features is None else features.shape[1])
                         if features is None:
                             n, d = job['total'], values.shape[1]
-                            self._check_pca_size(n, d)
-                            features = np.lib.format.open_memmap(path, mode='w+', dtype=np.float64, shape=(n, d))
+                            pca_batch_size = self._check_pca_size(n, d, streamed=True)
+                            buffer = self.storage.allocate((n, d))
+                            features = buffer.array
                         features[offset:offset+len(images)] = values
                         with self.lock:
                             record['completed'] = offset+len(images)
-                    features.flush()
                 with self._stage(record, 'pca', 'fitting PCA'):
-                    mean, components, projection = _pca(features)
-                    positions = (features-mean) @ components.T
-                base = dict(path=path, mean=mean, components=components, projection=projection,
+                    mean, components, projection = _pca(features, batch_size=pca_batch_size)
+                    positions = np.empty((len(features), 3), dtype=np.float64)
+                    projection_batch_size = pca_batch_size or 1024
+                    for offset in range(0, len(features), projection_batch_size):
+                        stop = offset + projection_batch_size
+                        positions[offset:stop] = (features[offset:stop]-mean) @ components.T
+                buffer.seal()
+                base = dict(buffer=buffer, mean=mean, components=components, projection=projection,
                             feature_dim=features.shape[1], feature_method=getattr(encoder, 'feature_method', 'image features'),
-                            model_key=key[1], image_digests=digests, positions=positions)
+                            model_key=key[1], image_digests=digests, positions=positions,
+                            class_labels=dict(getattr(encoder, 'class_labels', {})))
                 del features
-                self._bases[key] = base
             except Exception:
                 if features is not None:
                     del features
-                path.unlink(missing_ok=True)
+                if buffer is not None:
+                    buffer.release()
                 raise
         else:
             with self.lock:
@@ -723,29 +959,61 @@ class EmbeddingManager:
                 image = self._original_image(job['preview_id'], index)
                 if hashlib.sha256(image.tobytes()).hexdigest() != digest:
                     raise ValueError('The dataset image pixels changed. Reload the dataset to refresh image embeddings.')
-        points = []
-        for index, position in enumerate(base['positions']):
-            preview = self.previews.get(job['preview_id'], index)
-            points.append(dict(index=index, name=preview['input_name'], image=preview['original']['image'], position=position.tolist()))
+        try:
+            dataset_id = self.previews.get(job['preview_id'])['config']['dataset_id']
+            points = []
+            for offset in range(0, len(base['positions']), 100):
+                for item in self.previews.datasets.page(dataset_id, offset, 100)['items']:
+                    index = item['index']
+                    points.append(dict(index=index, name=item['name'],
+                        image=f'/previews/{job["preview_id"]}/input-{index}/original.png',
+                        position=base['positions'][index].tolist()))
+            labels = match_dataset_labels(self.previews.datasets.labels(dataset_id), base['class_labels'], len(points))
+        except Exception:
+            if created_base:
+                base['buffer'].release()
+            raise
         with self.lock:
+            self._bases[key] = base
             self._job_bases[job_id] = base
-            self.jobs[job_id].update(completed=job['total'], points=points,
+            self.jobs[job_id].update(completed=job['total'], points=points, labels=labels,
                                      projection=copy.deepcopy(base['projection']), feature_dim=base['feature_dim'],
                                      feature_method=base['feature_method'])
 
     def _original_image(self, preview_id, input_index):
-        from PIL import Image
-        # PreviewManager freezes DatasetManager.image's preprocessing as PNG.
-        # Reading that same PNG keeps model inputs and visible images identical.
-        with Image.open(io.BytesIO(self.previews.image(preview_id, input_index, 'original'))) as image:
-            return image.convert('RGB')
+        return self.previews.original_image(preview_id, input_index)
+
+    def _image_batches(self, preview_id, count, batch_size):
+        """Prepare one batch ahead while inference consumes the current batch."""
+        pool = ThreadPoolExecutor(max_workers=self.IMAGE_WORKERS, thread_name_prefix='image-preparation')
+        def submit(offset):
+            return [pool.submit(self._original_image, preview_id, index)
+                    for index in range(offset, min(offset+batch_size, count))]
+        try:
+            pending = submit(0)
+            for offset in range(0, count, batch_size):
+                # Future order, not completion order, preserves input/label IDs.
+                images = [future.result() for future in pending]
+                pending = submit(offset+batch_size)
+                yield offset, images
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     @staticmethod
     def _neighbors(features, vector, points, exclude=None):
         import numpy as np
         similarities = np.clip(features @ vector, -1, 1)
-        order = np.argsort(-similarities, kind='stable')
-        nearest = order[:5] if exclude is None else order[order != exclude][:5]
+        scores = similarities.copy() if exclude is not None else similarities
+        if exclude is not None:
+            scores[exclude] = -np.inf
+        count = min(5, len(scores) - int(exclude is not None))
+        if not count:
+            return []
+        threshold = np.partition(scores, len(scores)-count)[len(scores)-count]
+        higher = np.flatnonzero(scores > threshold)
+        ties = np.flatnonzero(scores == threshold)[:count-len(higher)]
+        selected = np.concatenate((higher, ties))
+        nearest = selected[np.lexsort((selected, -scores[selected]))]
         return [dict(index=int(index), name=points[index]['name'], similarity=float(similarities[index]))
                 for index in nearest]
 
@@ -753,15 +1021,16 @@ class EmbeddingManager:
         import numpy as np
         with self.lock:
             expansion = copy.deepcopy(self.expansions[expansion_id])
-            job = copy.deepcopy(self.jobs[expansion['job_id']])
+            job = dict(self.jobs[expansion['job_id']])
         base = self._job_bases[job['id']]
         if job['model']['source'] == 'local' and _model_key(job['model']) != base['model_key']:
             raise ValueError('The local model changed after the original embeddings. Reload the preview.')
         record = self.expansions[expansion_id]
         encoder = self._load_encoder(job['model'], base['model_key'], device=job['device'], record=record)
-        features = np.load(base['path'], mmap_mode='r')
+        features = base['buffer'].readonly()
         index = expansion['input_index']
-        original = self._original_image(job['preview_id'], index)
+        text_dataset = job['task'] in ('summarization', 'generation') and bool(job.get('dataset_id'))
+        original = None if text_dataset else self._original_image(job['preview_id'], index)
         preview = self.previews.get(job['preview_id'], index)
         nodes = []
         for offset in range(0, expansion['total'], self.BATCH_SIZE):
@@ -770,14 +1039,19 @@ class EmbeddingManager:
                     return
             entries = preview['nodes'][offset:offset+self.BATCH_SIZE]
             with self._stage(record, 'embedding', 'embedding transformations'):
-                images = [apply_image(original, node['action']) for node in entries]
-                values = _normalize(self._encode_batch(encoder, images), len(images), base['feature_dim'])
+                inputs = [node['text'] for node in entries] if text_dataset else [
+                    apply_image(original, node['action']) for node in entries]
+                labels = ([self._prompt_label(index, preview['input_name'], entry['action']) for entry in entries]
+                          if job['task'] == 'generation' else None)
+                values = _normalize(self._encode_batch(encoder, inputs, truncate=job['task'] == 'summarization',
+                                                      labels=labels), len(inputs), base['feature_dim'])
             with self._stage(record, 'pca', 'projecting transformations'):
                 positions = (values-base['mean']) @ base['components'].T
             for entry, value, position in zip(entries, values, positions):
-                nodes.append(dict(id=entry['id'], action=entry['action'], image=entry['image'], position=position.tolist(),
-                                  similarity=float(np.clip(value @ features[index], -1, 1)),
-                                  neighbors=self._neighbors(features, value, job['points'])))
+                node = copy.deepcopy(entry)
+                node.update(position=position.tolist(), similarity=float(np.clip(value @ features[index], -1, 1)),
+                            neighbors=self._neighbors(features, value, job['points']))
+                nodes.append(node)
             with self.lock:
                 if self.expansions[expansion_id]['status'] == 'cancelled':
                     return

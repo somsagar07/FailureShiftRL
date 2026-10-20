@@ -1,9 +1,13 @@
 """Setup decisions stay testable without package downloads or a physical GPU."""
 import unittest
+import contextlib
+import io
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -174,6 +178,159 @@ class TorchSetupTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
                 self.assertIn(expected, result.stdout + result.stderr)
                 self.assertFalse((root / '.venv').exists())
+
+
+class TorchvisionSetupTests(unittest.TestCase):
+    def plan(self, current, vision=None, platform='linux'):
+        planner = getattr(check_environment, 'plan_torchvision_install', None)
+        self.assertTrue(callable(planner), 'Torchvision needs a plan tied to the selected Torch build')
+        with patch.object(check_environment.sys, 'platform', platform):
+            return planner(current, vision)
+
+    def test_missing_vision_uses_actual_torch_index_and_pins_torch_for_resolver(self):
+        for release, cuda, index in [('2.11.0+cu128', '12.8', 'cu128'),
+                                     ('2.8.0+cu126', '12.6', 'cu126'),
+                                     ('2.6.0+cu124', '12.4', 'cu124'),
+                                     ('2.7.1+cu118', '11.8', 'cu118'),
+                                     ('2.11.0+cpu', None, 'cpu')]:
+            with self.subTest(release=release):
+                plan = self.plan({'version': release, 'cuda': cuda, 'available': False})
+                self.assertTrue(plan['install'])
+                self.assertEqual(plan['index_url'], f'https://download.pytorch.org/whl/{index}')
+                self.assertEqual(plan['torch_requirement'], f'torch=={release}')
+                self.assertEqual(plan['requirement'], 'torchvision>=0.21,<1')
+
+    def test_working_vision_is_kept_only_when_torch_release_and_build_match(self):
+        current = {'version': '2.8.0+cu126', 'cuda': '12.6', 'available': True}
+        vision = {'version': '0.23.0+cu126', 'torch_version': '2.8.0', 'available': True}
+        self.assertFalse(self.plan(current, vision)['install'])
+        self.assertTrue(self.plan(current, {**vision, 'torch_version': '2.7.1'})['install'])
+        wrong_build = self.plan(current, {**vision, 'version': '0.23.0+cpu'})
+        self.assertTrue(wrong_build['install'])
+        self.assertEqual(wrong_build['requirement'], 'torchvision==0.23.0+cu126')
+
+    def test_explicit_cpu_vision_target_cannot_retain_a_cuda_wheel(self):
+        plan = self.plan({'version': '2.11.0+cpu', 'cuda': None, 'available': False},
+                         {'version': '0.26.0+cu128', 'torch_version': '2.11.0', 'available': True})
+        self.assertTrue(plan['install'])
+        self.assertEqual(plan['requirement'], 'torchvision==0.26.0+cpu')
+        self.assertEqual(plan['torch_requirement'], 'torch==2.11.0+cpu')
+
+    def test_broken_matching_vision_is_reinstalled_without_reinstalling_torch(self):
+        plan = self.plan({'version': '2.11.0+cu128', 'cuda': '12.8', 'available': True},
+                         {'version': '0.26.0+cu128', 'torch_version': '2.11.0', 'available': False})
+        self.assertTrue(plan['install'])
+        self.assertTrue(plan['reinstall'])
+        self.assertEqual(plan['requirement'], 'torchvision==0.26.0+cu128')
+
+    def test_macos_matching_wheels_need_no_local_cpu_suffix(self):
+        plan = self.plan({'version': '2.11.0', 'cuda': None, 'available': False},
+                         {'version': '0.26.0', 'torch_version': '2.11.0', 'available': True}, platform='darwin')
+        self.assertFalse(plan['install'])
+
+    def test_pypi_metadata_preserves_the_installed_cuda_build_and_distribution_pin(self):
+        probe = getattr(check_environment, 'installed_torchvision', None)
+        self.assertTrue(callable(probe))
+        modules = {'torchvision': SimpleNamespace(__version__='0.23.0+cu128'),
+                   'torchvision.transforms.v2': SimpleNamespace(ToImage=object())}
+        with patch.object(check_environment, 'version', return_value='0.23.0'), \
+             patch.object(check_environment, 'package_requirements', return_value=['torch (==2.8.0)']), \
+             patch.object(check_environment.importlib, 'import_module', side_effect=modules.__getitem__):
+            current = probe()
+        plan = self.plan({'version': '2.8.0+cu128', 'package_version': '2.8.0', 'cuda': '12.8'}, current)
+        self.assertFalse(plan['install'], 'A compatible PyPI wheel must be retained')
+        self.assertEqual(plan['requirement'], 'torchvision==0.23.0')
+        self.assertEqual(plan['torch_requirement'], 'torch==2.8.0')
+
+    def test_unknown_non_cuda_build_is_not_silently_replaced_by_cpu_vision(self):
+        with self.assertRaisesRegex(RuntimeError, 'build|wheel'):
+            self.plan({'version': '2.8.0+rocm6.4', 'cuda': None, 'available': False})
+
+    def test_vision_resolver_and_general_requirements_cannot_replace_working_torch(self):
+        source = Path(__file__).resolve().parents[1]
+        for reinstall in (False, True):
+            with self.subTest(reinstall=reinstall), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shutil.copy2(source / 'setup.sh', root / 'setup.sh')
+                (root / 'requirements.txt').write_text('torch>=2.6,<3\ntorchvision>=0.21,<1\n')
+                (root / '.venv' / 'bin').mkdir(parents=True)
+                shim = root / '.venv' / 'bin' / 'python'
+                action = 'reinstall' if reinstall else 'install'
+                requirement = 'torchvision==0.23.0+cu126' if reinstall else 'torchvision>=0.21,<1'
+                vision_plan = '\t'.join((action, requirement, 'https://download.pytorch.org/whl/cu126', 'torch==2.8.0+cu126'))
+                setup_plan = 'cuda\tkeep\t-\t-\t' + vision_plan
+                shim.write_text(f'''#!{sys.executable}
+import json, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(__file__).resolve().parents[2]
+if '--setup-plan' in args:
+    print({setup_plan!r})
+elif '--vision-plan' in args:
+    print({vision_plan!r})
+elif '--installed-constraints' in args:
+    print('torch==2.8.0+cu126\\ntorchvision==0.23.0+cu126')
+elif 'pip' in args and 'install' in args:
+    entry = {{'args': args}}
+    if '--constraint' in args:
+        entry['constraints'] = pathlib.Path(args[args.index('--constraint') + 1]).read_text()
+    with (root / 'pip-calls.jsonl').open('a') as log:
+        log.write(json.dumps(entry) + '\\n')
+''')
+                shim.chmod(0o755)
+                result = subprocess.run(['bash', str(root / 'setup.sh')],
+                                        env={**os.environ, 'TMPDIR': temporary}, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in (root / 'pip-calls.jsonl').read_text().splitlines()]
+                self.assertEqual(len(calls), 2, 'Setup must install vision from its official index before app requirements')
+                self.assertIn('https://download.pytorch.org/whl/cu126', calls[0]['args'])
+                self.assertIn(requirement, calls[0]['args'])
+                if reinstall:
+                    self.assertIn('--no-deps', calls[0]['args'])
+                    self.assertIn('--force-reinstall', calls[0]['args'])
+                    self.assertNotIn('torch==2.8.0+cu126', calls[0]['args'])
+                else:
+                    self.assertIn('torch==2.8.0+cu126', calls[0]['args'])
+                self.assertIn('torch==2.8.0+cu126', calls[1].get('constraints', ''))
+                self.assertIn('torchvision==0.23.0+cu126', calls[1].get('constraints', ''))
+
+
+class GenerationEnvironmentTests(unittest.TestCase):
+    def check(self, *, missing_module=None, missing_export=None, transformers_version='4.57.6'):
+        class Exports:
+            def __getattr__(self, name):
+                if name == missing_export:
+                    raise ImportError(f'{name} is unavailable')
+                return object()
+        def load(name):
+            if name == missing_module:
+                raise ImportError(f'{name} is unavailable')
+            return Exports()
+        versions = {'torch': '2.11.0+cu128', 'torchvision': '0.26.0+cu128', 'transformers': transformers_version}
+        output = io.StringIO()
+        with patch.object(check_environment.importlib, 'import_module', side_effect=load), \
+             patch.object(check_environment, 'version', side_effect=lambda name: versions.get(name, '1.0.0')), \
+             patch.object(check_environment, 'check_torch_runtime', return_value={'backend': 'cpu', 'cuda': None}), \
+             patch.object(check_environment, 'nvidia_drivers', return_value=[]), contextlib.redirect_stdout(output):
+            result = check_environment.check_environment()
+        return result, output.getvalue()
+
+    def test_generation_backends_require_importable_vision_and_processor_exports(self):
+        for fields in [{'missing_module': 'torchvision'}, {'missing_export': 'Qwen3VLProcessor'},
+                       {'missing_export': 'Qwen3VLForConditionalGeneration'}, {'missing_export': 'BlipProcessor'},
+                       {'missing_export': 'BlipForQuestionAnswering'}]:
+            with self.subTest(fields=fields):
+                result, output = self.check(**fields)
+                self.assertEqual(result, 1)
+                self.assertIn('MISSING OR BROKEN', output)
+                self.assertIn(next(iter(fields.values())), output)
+
+    def test_transformers_456_is_rejected_before_a_generation_run(self):
+        result, output = self.check(transformers_version='4.56.2')
+        self.assertEqual(result, 1)
+        self.assertIn('4.57', output)
+
+    def test_importable_generation_backends_pass(self):
+        self.assertEqual(self.check()[0], 0)
 
 
 if __name__ == '__main__':

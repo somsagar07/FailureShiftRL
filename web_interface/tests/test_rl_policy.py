@@ -10,6 +10,32 @@ from rl_policy import TerminalDQN
 
 
 class TerminalDQNTests(unittest.TestCase):
+    def test_chunked_statistics_collect_means_without_full_reward_matrix(self):
+        policy = TerminalDQN(2, 3)
+        policy.network = torch.nn.Linear(2, 3, bias=False)
+        with torch.no_grad():
+            policy.network.weight.copy_(torch.tensor([[.2, .4], [.7, .1], [.5, .8]]))
+        policy.updates = 1
+        states = np.tile(np.eye(2, dtype=np.float32), (150, 1))
+        states.setflags(write=False)
+        means = np.full(300, np.nan, dtype=np.float32)
+        policy.action_statistics(states, input_mean_out=means)
+        np.testing.assert_allclose(means, np.tile([1.4 / 3, 1.3 / 3], 150), atol=1e-7)
+        with self.assertRaises(ValueError):
+            policy.action_statistics(states, input_mean_out=np.empty(1))
+
+    def test_landscape_retains_each_inputs_rewards_in_action_order(self):
+        policy = TerminalDQN(2, 3)
+        policy.network = torch.nn.Linear(2, 3, bias=False)
+        with torch.no_grad():
+            policy.network.weight.copy_(torch.tensor([[.2, .4], [.7, .1], [.5, .8]]))
+        policy.updates = 1
+        states = np.tile(np.eye(2, dtype=np.float32), (150, 1))
+        values = np.full((300, 3), np.nan, dtype=np.float32)
+        policy.action_statistics(states, q_values_out=values)
+        np.testing.assert_allclose(values, np.tile([[.2, .7, .5], [.4, .1, .8]], (150, 1)), atol=1e-7)
+        self.assertEqual(policy.updates, 1)
+
     def test_action_landscape_uses_original_inputs_at_current_checkpoint(self):
         policy = TerminalDQN(2, 3, seed=9)
         policy.network = torch.nn.Linear(2, 3, bias=False)

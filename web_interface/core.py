@@ -9,6 +9,13 @@ from collections import Counter
 
 MAX_ACTIONS = 500
 IMAGE_DIMENSIONS = {'rotation': (-180, 180, 0), 'darkness': (0, 1, 0), 'saturation': (0, 3, 1)}
+GENERATION_STYLES = ['photograph', 'watercolor', 'pencil drawing', 'digital illustration', '3D render']
+GENERATION_DIMENSIONS = dict(style=GENERATION_STYLES,
+    lighting=['even', 'soft', 'directional', 'high-key', 'low-key'],
+    detail=['minimal', 'simple', 'moderate', 'detailed', 'intricate'])
+LEGACY_GENERATION_SPACE = dict(description=['unique', 'distinctive', 'cool'],
+                               profession=['scientist', 'artist', 'professor'],
+                               setting=['corporate office', 'research center', 'classroom'])
 
 
 TEXT_ACTIONS = [
@@ -26,7 +33,7 @@ def default_action_space(task):
     if task == 'summarization':
         return {'actions': list(TEXT_ACTIONS)}
     if task == 'generation':
-        return dict(description=['unique', 'distinctive', 'cool'], profession=['scientist', 'artist', 'professor'], setting=['corporate office', 'research center', 'classroom'])
+        return {key:list(values) for key,values in GENERATION_DIMENSIONS.items()}
     raise ValueError('Unknown task.')
 
 
@@ -34,8 +41,15 @@ def normalize_action_space(task, space=None):
     defaults = default_action_space(task)
     if space is None:
         space = defaults
+    elif task == 'generation' and isinstance(space, dict) and set(space) == set(LEGACY_GENERATION_SPACE):
+        # Preserve explicitly saved template spaces without making them new defaults.
+        defaults = LEGACY_GENERATION_SPACE
+    elif task == 'generation' and isinstance(space, dict) and set(space) == {'styles'}:
+        defaults = {'styles': GENERATION_STYLES}
     if not isinstance(space, dict) or set(space) != set(defaults):
         raise ValueError('Action space must contain: ' + ', '.join(defaults) + '.')
+    grouped_generation = task == 'generation' and set(defaults) == set(GENERATION_DIMENSIONS)
+    allow_disabled = task == 'classification' or grouped_generation
     normalized = {}
     for key, values in space.items():
         if not isinstance(values, list) or len(values) > 25:
@@ -52,12 +66,16 @@ def normalize_action_space(task, space=None):
                 value = value.strip()
                 if task == 'summarization' and value not in TEXT_ACTIONS:
                     raise ValueError(f'Unknown text action: {value}.')
+                if task == 'generation' and key == 'styles' and value not in GENERATION_STYLES:
+                    raise ValueError(f'Unknown generation style: {value}. Choose an available style.')
+                if grouped_generation and value not in GENERATION_DIMENSIONS[key]:
+                    raise ValueError(f'Unknown generation {key}: {value}. Choose an available value.')
             if value not in cleaned:
                 cleaned.append(value)
-        if not cleaned and task != 'classification':
+        if not cleaned and not allow_disabled:
             raise ValueError(f'Choose at least one value for {key}.')
         normalized[key] = cleaned
-    if task == 'classification' and not any(normalized.values()):
+    if allow_disabled and not any(normalized.values()):
         raise ValueError('Enable at least one transformation in the action space.')
     size = len(normalized['actions']) if task == 'summarization' else math.prod(max(1, len(v)) for v in normalized.values())
     if size > MAX_ACTIONS:
@@ -70,7 +88,21 @@ def actions_for(task, space=None):
     if task == 'summarization':
         # IDs stay stable when other actions are removed, preserving per-action RNG.
         return [dict(id=TEXT_ACTIONS.index(name), name=name) for name in space['actions']]
-    keys = list(default_action_space(task))
+    if task == 'generation' and 'styles' in space:
+        return [dict(id=GENERATION_STYLES.index(style), style=style) for style in space['styles']]
+    if task == 'generation' and set(space) == set(GENERATION_DIMENSIONS):
+        keys = list(GENERATION_DIMENSIONS)
+        actions = []
+        for combination in itertools.product(*(space[key] or [None] for key in keys)):
+            # Reserve zero in each axis for an omitted instruction. IDs remain
+            # stable when values are filtered or another group is removed.
+            identity = 0
+            for key, value in zip(keys, combination):
+                values = GENERATION_DIMENSIONS[key]
+                identity = identity * (len(values)+1) + (values.index(value)+1 if value is not None else 0)
+            actions.append(dict(id=identity, **dict(zip(keys, combination))))
+        return actions
+    keys = list(LEGACY_GENERATION_SPACE if task == 'generation' else default_action_space(task))
     values = [space[key] or [IMAGE_DIMENSIONS[key][2]] for key in keys]
     return [dict(id=i, **dict(zip(keys, combination))) for i, combination in enumerate(itertools.product(*values))]
 
@@ -108,6 +140,28 @@ def apply_image(image, action):
     result = image.rotate(action['rotation'])
     result = ImageEnhance.Color(result).enhance(action['saturation'])
     return ImageEnhance.Brightness(result).enhance(1 - action['darkness'])
+
+
+def apply_prompt(text, action):
+    """Apply presentation settings without rewriting the original scene text."""
+    if any(key in action for key in GENERATION_DIMENSIONS):
+        instructions = []
+        for key, values in GENERATION_DIMENSIONS.items():
+            value = action.get(key)
+            if value is None:
+                continue
+            if value not in values:
+                raise ValueError(f'Choose an available generation {key}.')
+            instructions.append(f'Detail level: {value}.' if key == 'detail' else f'{value[0].upper()}{value[1:]} {key}.')
+        if not instructions:
+            raise ValueError('Enable at least one presentation instruction.')
+        return ' '.join(instructions) + ' Scene: ' + text
+    # Only explicit legacy jobs substitute template slots; other braces stay literal.
+    for key in LEGACY_GENERATION_SPACE:
+        if key not in action:
+            raise ValueError('Choose a generation style or a complete legacy template action.')
+        text = text.replace('{' + key + '}', action[key])
+    return text
 
 
 def apply_text(text, action, rng):

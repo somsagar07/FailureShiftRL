@@ -35,12 +35,15 @@ if [[ ! -x "$probe_python" ]]; then
   probe_args+=(--fresh)
 fi
 plan="$($probe_python -I check_environment.py --setup-plan "$mode" "${probe_args[@]}")"
-IFS=$'\t' read -r backend action requirement index_url <<< "$plan"
+IFS=$'\t' read -r backend action requirement index_url vision_action vision_requirement vision_index torch_pin <<< "$plan"
 if [[ "$dry_run" == true ]]; then
   if [[ "$action" == install ]]; then
     printf 'Would install %s from %s into %s/.venv\n' "$requirement" "$index_url" "$PWD"
   fi
-  printf 'Would install app requirements, run pip check, and verify the %s runtime.\n' "$backend"
+  if [[ "$vision_action" != keep ]]; then
+    printf 'Would %s %s from %s, preserving %s.\n' "$vision_action" "$vision_requirement" "$vision_index" "$torch_pin"
+  fi
+  printf 'Would install app requirements, run pip check, install the isolated Vev runtime, and verify the %s runtime.\n' "$backend"
   exit 0
 fi
 
@@ -58,11 +61,29 @@ if [[ "$action" == install ]]; then
     exit 1
   fi
 fi
-if ! .venv/bin/python -I -m pip install "${pip_options[@]}" -r requirements.txt; then
+vision_plan="$(.venv/bin/python -I check_environment.py --vision-plan)"
+IFS=$'\t' read -r vision_action vision_requirement vision_index torch_pin <<< "$vision_plan"
+if [[ "$vision_action" != keep ]]; then
+  vision_options=("$torch_pin")
+  if [[ "$vision_action" == reinstall ]]; then
+    # Repair only the installed vision wheel; never force-reinstall working Torch.
+    vision_options=(--force-reinstall --no-deps)
+  fi
+  if ! .venv/bin/python -I -m pip install "${pip_options[@]}" --index-url "$vision_index" \
+      "$vision_requirement" "${vision_options[@]}"; then
+    printf '\nCould not install torchvision for %s. The Torch version was pinned; check the download error above.\n' "$torch_pin" >&2
+    exit 1
+  fi
+fi
+constraints="$(mktemp "${TMPDIR:-/tmp}/failureshiftrl-torch-constraints-XXXXXX.txt")"
+trap 'rm -f -- "$constraints"' EXIT
+.venv/bin/python -I check_environment.py --installed-constraints > "$constraints"
+if ! .venv/bin/python -I -m pip install "${pip_options[@]}" --constraint "$constraints" -r requirements.txt; then
   printf '\nSetup could not finish. Check the package-download error above and rerun: bash setup.sh\n' >&2
   exit 1
 fi
 .venv/bin/python -I -m pip check
+.venv/bin/python -E setup_vev.py
 check_args=()
 if [[ "$backend" == cuda ]]; then
   check_args+=(--require-cuda)

@@ -1,5 +1,6 @@
 """Exercise discovery, cancellation and reviewed training through real HTTP routing."""
 import json
+import io
 import tempfile
 import time
 import unittest
@@ -16,6 +17,7 @@ from test_http import MemoryServer
 
 class Encoder:
     feature_method = 'fixture RGB'
+    class_labels = {0: 'dark', 1: 'bright'}
 
     def __init__(self, model):
         pass
@@ -33,6 +35,9 @@ class Evaluator:
         cls = int(prob >= .25)
         return dict(class_id=cls, label=str(cls), confidence=max(prob, 1-prob),
                     probabilities=[1-prob, prob])
+
+    def resolve_label(self, value):
+        return int(value)
 
     def score(self, output, baseline, *, target=None):
         target = baseline['class_id'] if target is None else int(target)
@@ -99,18 +104,21 @@ class DiscoveryHTTPTests(unittest.TestCase):
             self.server = create_server(8000, Path(self.tmp.name) / 'isolated' / 'previews',
                                         evaluator_factory=Evaluator, finetune_fn=train,
                                         model_preparer=lambda model: (model, {}))
-        images = Path(self.tmp.name) / 'images'
-        images.mkdir()
-        Image.new('RGB', (8, 8), 'red').save(images / 'red.png')
-        code, body = self.request('/api/datasets', 'POST', body={'source': 'folder', 'path': str(images)})
-        self.assertEqual(code, 202)
-        dataset = json.loads(body)
-        # Dataset has a distinct terminal status ('ready').
-        until = time.monotonic() + 5
-        while dataset['status'] == 'loading' and time.monotonic() < until:
-            time.sleep(.01)
-            dataset = json.loads(self.request('/api/datasets/' + dataset['id'])[1])
+        from datasets import Dataset, Features, ClassLabel, Image as HFImage
+        buffer = io.BytesIO()
+        Image.new('RGB', (8, 8), 'red').save(buffer, format='PNG')
+        records = Dataset.from_dict({'image': [buffer.getvalue()], 'labels': [0]},
+            features=Features({'image': HFImage(), 'labels': ClassLabel(names=['bright', 'dark'])}))
+        with patch('datasets.load_dataset', return_value=records):
+            code, body = self.request('/api/datasets', 'POST', body={'source': 'huggingface', 'name': 'fixture/images'})
+            self.assertEqual(code, 202)
+            dataset = json.loads(body)
+            until = time.monotonic() + 5
+            while dataset['status'] == 'loading' and time.monotonic() < until:
+                time.sleep(.01)
+                dataset = json.loads(self.request('/api/datasets/' + dataset['id'])[1])
         self.assertEqual(dataset['status'], 'ready', dataset)
+        self.assertEqual(dataset['label_count'], 1)
         code, body = self.request('/api/previews', 'POST', body={
             'dataset_id': dataset['id'], 'model': {'source': 'huggingface', 'name': 'test/model'},
             'action_space': {'rotation': [0], 'darkness': [.1, .5], 'saturation': []}})
@@ -120,14 +128,30 @@ class DiscoveryHTTPTests(unittest.TestCase):
         analysis = json.loads(body)
         self.wait('/api/embeddings/' + analysis['id'], analysis)
         code, body = self.request('/api/discoveries', 'POST', body={
-            'embedding_id': analysis['id'], 'episodes': 4, 'seed': 7})
+            'embedding_id': analysis['id'], 'episodes': 20, 'seed': 7})
         self.assertEqual(code, 202, body)
         job = json.loads(body)
         job = self.wait('/api/discoveries/' + job['id'], job)
-        self.assertEqual(job['episode'], 4)
+        self.assertEqual(job['episode'], 20)
+        self.assertEqual(job['config']['label_map'], {'0': 1}, 'dataset ID 0 maps by name to model ID 1')
         self.assertTrue(job['records'])
         self.assertTrue(job['history'])
         self.assertNotIn('probabilities', json.dumps(job))
+        prediction_path = '/api/discoveries/' + job['id'] + '/predictions'
+        code, predictions = self.request(prediction_path + '?input=0')
+        self.assertEqual(code, 200)
+        predictions = json.loads(predictions)
+        self.assertEqual(predictions['discovery_id'], job['id'])
+        self.assertEqual(predictions['policy_updates'], 5)
+        self.assertEqual([item['action_id'] for item in predictions['actions']], [0, 1])
+        self.assertAlmostEqual(sum(item['preference'] for item in predictions['actions']), 1., places=6)
+        for query in ('', '?input=-1', '?input=1', '?input=bad', '?input=0&input=0', '?input=0&extra=1'):
+            self.assertEqual(self.request(prediction_path + query)[0], 400)
+        code, values = self.request(job['artifacts']['predictions'])
+        self.assertEqual(code, 200)
+        import numpy as np
+        matrix = np.load(io.BytesIO(values), allow_pickle=False)
+        np.testing.assert_allclose(matrix[0], [item['q_value'] for item in predictions['actions']])
         code, report = self.request(job['artifacts']['report'])
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(report)['id'], job['id'])

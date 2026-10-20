@@ -6,8 +6,10 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
+from functools import cached_property
 from pathlib import Path
 
+from classification_labels import model_label_groups
 from model_loading import configure_parallel_loading
 from text_encoders import (_dependencies, _encoder_device, _options, _pretrained, _resolved_revision,
                            _selection, _token_limit, SummarizationEncoder, DiffusionPromptEncoder)
@@ -54,7 +56,11 @@ class Evaluator:
         self.threshold=unit(config.get('failure_threshold',.15),'failure_threshold')
 
     def close(self):
-        for name in ('model','pipeline','encoder','scorer','nli','processor','tokenizer'):
+        if not getattr(self,'_shared_resources',False):
+            close=getattr(getattr(self,'judge',None),'close',None)
+            if callable(close):
+                close()
+        for name in ('model','pipeline','encoder','scorer','nli','processor','tokenizer','judge','_generation_runtime'):
             if hasattr(self,name):
                 delattr(self,name)
         if getattr(self,'_shared_resources',False):
@@ -96,7 +102,16 @@ class ClassificationEvaluator(Evaluator):
             raise ValueError(f'Could not load classifier pretrained weights/processor: {exc}') from exc
 
     def resolve_label(self,target):
-        return resolve_label(self.model.config,target)
+        try:
+            return resolve_label(self.model.config,target)
+        except ValueError:
+            if isinstance(target,str) and target.strip().lower() in self.label_groups:
+                return target.strip().lower()
+            raise
+
+    @cached_property
+    def label_groups(self):
+        return model_label_groups(self.model.config.id2label)
 
     def predict(self,value,*,seed=0,artifact_name='sample'):
         inputs=self.processor(images=value,return_tensors='pt').to(self.device)
@@ -113,7 +128,8 @@ class ClassificationEvaluator(Evaluator):
         return {**super().describe(),
                 'reward_formula':'0.5*error + 0.25*error*max_wrong_probability + 0.25*max(0,(baseline_target_probability-target_probability)/baseline_target_probability)',
                 'severity_formula':'1 for a target error, otherwise relative target-confidence drop',
-                'label_policy':'Explicit model IDs or exact unique model labels; absent labels use original predictions as consistency candidates.'}
+                'label_policy':'Dataset/manual targets map to model classes or declared ImageNet pet groups. Group errors use the actual top-1 class; target confidence sums group probabilities. Legacy unlabelled scores measure original-prediction consistency.',
+                'label_groups':self.label_groups}
 
     def _probabilities(self,output):
         vector=output['probabilities']
@@ -131,17 +147,23 @@ class ClassificationEvaluator(Evaluator):
         current,original=self._probabilities(output),self._probabilities(baseline)
         labelled=target is not None
         target_id=self.resolve_label(target) if labelled else baseline['class_id']
-        error=output['class_id']!=target_id
-        baseline_error=baseline['class_id']!=target_id
-        drop=max(0.,(original[target_id]-current[target_id])/max(original[target_id],1e-8))
+        grouped=isinstance(target_id,str)
+        target_ids=set(self.label_groups[target_id]) if grouped else {target_id}
+        current_target=sum(current[index] for index in target_ids)
+        original_target=sum(original[index] for index in target_ids)
+        error=output['class_id'] not in target_ids
+        baseline_error=baseline['class_id'] not in target_ids
+        drop=max(0.,(original_target-current_target)/max(original_target,1e-8))
         # Actual labelled mistakes retain search signal even when present before perturbation.
-        wrong_confidence=max(probability for index,probability in enumerate(current) if index!=target_id) if len(current)>1 else 0.
+        wrong_confidence=max((probability for index,probability in enumerate(current) if index not in target_ids),default=0.)
         reward=.5*float(error)+.25*float(error)*wrong_confidence+.25*drop
         severity=1. if error else drop
+        target_info={'target_label':target_id,'target_class_count':len(target_ids)} if grouped else {
+            'target_id':target_id,'target_label':self.model.config.id2label[target_id]}
         return {'reward':reward,'severity':severity,'failure':bool(error),
                 'criterion':'labelled classification error' if labelled else 'original-prediction consistency candidate',
-                'metrics':{'target_id':target_id,'target_label':self.model.config.id2label[target_id],
-                'target_probability':current[target_id],'baseline_target_probability':original[target_id],
+                'metrics':{**target_info,
+                'target_probability':current_target,'baseline_target_probability':original_target,
                 'confidence_drop':drop,'wrong_confidence':wrong_confidence,'baseline_error':bool(baseline_error),'error':bool(error),
                 'new_error':bool(error and not baseline_error)}}
 
@@ -227,9 +249,11 @@ class SummarizationEvaluator(Evaluator):
             raise ValueError('Summary metric must be reference or grounded.')
         self.reference=config.get('reference_summary','')
         self.source=config.get('source_text','')
-        if not isinstance(self.reference,str) or not self.reference.strip():
+        self.dataset_references=bool(config.get('dataset_id'))
+        self.truncate_inputs=self.dataset_references
+        if not self.dataset_references and (not isinstance(self.reference,str) or not self.reference.strip()):
             raise ValueError('Summary evaluation requires an explicit reference summary.')
-        if self.metric=='grounded' and (not isinstance(self.source,str) or not self.source.strip()):
+        if not self.dataset_references and self.metric=='grounded' and (not isinstance(self.source,str) or not self.source.strip()):
             raise ValueError('Grounded summary scoring needs original source text.')
         self.torch,_=_dependencies()
         self.device=_device(self.torch,config)
@@ -239,12 +263,27 @@ class SummarizationEvaluator(Evaluator):
         self.max_new_tokens=config.get('max_new_tokens',96)
         if isinstance(self.max_new_tokens,bool) or not isinstance(self.max_new_tokens,int) or not 1<=self.max_new_tokens<=512:
             raise ValueError('max_new_tokens must be an integer from 1 to 512.')
+        limits=[]
+        for decoder_config in (self.model.config,self.model.get_decoder().config):
+            limits.extend(getattr(decoder_config,name,None) for name in
+                          ('max_position_embeddings','max_decoder_position_embeddings','max_target_positions','n_positions'))
+        limits=[int(value) for value in limits if not isinstance(value,bool) and isinstance(value,(int,float))
+                and 0<value<10**9 and int(value)==value]
+        if limits:
+            # The decoder start token shares absolute positional capacity with
+            # generated tokens. Encoder/tokenizer input limits do not apply here.
+            self.max_new_tokens=min(self.max_new_tokens,min(limits)-1)
+            if self.max_new_tokens<1:
+                raise ValueError('The decoder needs capacity for a start token and generated output.')
         self.criterion='reference ROUGE-L review signal' if self.metric=='reference' else 'reference ROUGE-L and grounded NLI review signal'
         if self.metric=='grounded':
             self.nli=shared.nli if shared is not None else GroundedScorer(config.get('_nli_model',{'source':'huggingface','name':'cross-encoder/nli-MiniLM2-L6-H768'}),self.device)
 
-    def measure_summary(self,text,source=None):
-        overlap,repetition=rouge_l(self.reference,text),nonrepetition(text)
+    def measure_summary(self,text,source=None,*,reference=None):
+        reference=self.reference if reference is None else reference
+        if not isinstance(reference,str) or not reference.strip():
+            raise ValueError('Summary evaluation requires this article’s explicit reference summary.')
+        overlap,repetition=rouge_l(reference,text),nonrepetition(text)
         metrics={'rouge_l':overlap,'nonrepetition':repetition}
         quality=overlap*repetition
         if self.metric=='grounded':
@@ -252,8 +291,11 @@ class SummarizationEvaluator(Evaluator):
             quality=math.sqrt(quality*metrics['source_support'])
         return {'summary':text,'quality':quality,'components':metrics}
 
-    def predict(self,value,*,seed=0,artifact_name='sample'):
-        inputs={key:value.to(self.device) for key,value in self.encoder._prepare([value],self.encoder.prefix).items()}
+    def predict(self,value,*,seed=0,artifact_name='sample',reference_summary=None):
+        if self.dataset_references and (not isinstance(reference_summary,str) or not reference_summary.strip()):
+            raise ValueError('Dataset inference requires this article’s explicit reference summary.')
+        options={'truncate':True} if self.truncate_inputs else {}
+        inputs={key:tensor.to(self.device) for key,tensor in self.encoder._prepare([value],self.encoder.prefix,**options).items()}
         generation=copy.deepcopy(self.model.generation_config)
         generation.min_length=0
         generation.min_new_tokens=0
@@ -266,7 +308,8 @@ class SummarizationEvaluator(Evaluator):
         generation.max_new_tokens=self.max_new_tokens
         with self.torch.inference_mode():
             generated=self.model.generate(**inputs,generation_config=generation,use_model_defaults=False)
-        return self.measure_summary(self.tokenizer.decode(generated[0],skip_special_tokens=True),source=value)
+        return self.measure_summary(self.tokenizer.decode(generated[0],skip_special_tokens=True),source=value,
+                                    reference=reference_summary)
 
     def score(self,output,baseline,*,target=None):
         quality,original=unit(output['quality']),unit(baseline['quality'])
@@ -277,10 +320,15 @@ class SummarizationEvaluator(Evaluator):
 
     def describe(self):
         result=super().describe()
-        result['generation_policy']='Deterministic greedy decoding; min_length/min_new_tokens=0, max_new_tokens configured, beam-only flags reset.'
+        result['max_new_tokens']=self.max_new_tokens
+        result['generation_policy']='Deterministic greedy decoding; min_length/min_new_tokens=0, max_new_tokens capped by decoder capacity, beam-only flags reset.'
         result['grounding_policy']='NLI source support uses the evaluated input. Original-reference overlap is an intent-preservation proxy; meaning-changing actions require human review.'
         result['quality_formula']='ROUGE-L F1 × distinct-bigram ratio; grounded: sqrt(reference quality × mean sentence NLI support)'
         result['reward_formula']='0.5 × (1 - quality) + 0.5 × max(0, baseline quality - quality)'
+        result['reference_policy']='Per-article dataset reference' if self.dataset_references else 'Explicit reference summary'
+        result['input_policy']=dict(max_input_tokens=self.encoder.max_tokens, truncate=self.truncate_inputs,
+                                   policy='Source tokens beyond the model input limit are omitted; references remain complete.'
+                                   if self.truncate_inputs else 'Inputs exceeding the model token limit are rejected.')
         if hasattr(self,'nli'):
             result['nli_model']=self.nli.identity
         return result
@@ -395,19 +443,43 @@ def load_diffusion(model,*,encoder=None):
 
 
 class GenerationEvaluator(Evaluator):
-    criterion='CLIP prompt alignment review signal'
-    limitations='CLIP similarity estimates prompt alignment, not demographic bias, image fidelity or safety.'
+    criterion='CLIP scene alignment review signal'
+    limitations='CLIP similarity estimates scene alignment, not demographic bias, individual requirement correctness, style compliance or safety.'
 
     def __init__(self,model,config,directory,*,encoder=None,shared=None):
+        self.metric=config.get('generation_metric','combined')
+        if self.metric=='combined':
+            config={**config,'failure_threshold':config.get('failure_threshold',.5)}
         super().__init__(config,directory)
+        self._cancelled=self._on_model_call=self._progress=None
+        if self.metric not in ('combined','clip','checks'):
+            raise ValueError('Choose combined generation failure scoring or an explicit legacy metric.')
+        if self.metric=='combined':
+            from generation_bias import BiasProbe
+            self.bias_probe=BiasProbe(config.get('generation_bias_suite'),
+                repeats=config.get('generation_bias_repeats',3),seed=config.get('seed',42))
+            self.criterion='combined generation failure review signal'
+            self.limitations=('Maximum of measured content, instruction, visual-defect and optional matched-suite '
+                'quality-disparity scores. Rubrics and observed disparities are uncalibrated review signals; '
+                'they do not guarantee detection of every failure or establish demographic identity or causal bias.')
+        if self.metric=='checks':
+            self.criterion='visual requirement checks (automatic judge)'
+            self.limitations=('Question-answer agreement is a fallible review signal, not calibrated failure probability '
+                              'or the official GenEval 2 score. These checks assess scene requirements, not style compliance.')
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
+        from generation_runtime import GenerationRuntime, generation_precision
+        self.generation_precision_requested=config.get('generation_precision','auto')
+        precision=generation_precision(self.generation_precision_requested,self.device)
         self.encoder=_evaluation_encoder(DiffusionPromptEncoder,model,self.device,encoder,shared)
         if shared is not None:
             self.pipeline,self.revision=shared.pipeline,shared.revision
+            if shared._generation_runtime.precision!=precision:
+                raise ValueError('Shared generation resources must use the requested precision.')
+            self._generation_runtime=shared._generation_runtime
         else:
             self.pipeline,self.revision=load_diffusion(model,encoder=self.encoder)
-        self.pipeline.to(self.device)
+            self._generation_runtime=GenerationRuntime(self.pipeline,self.encoder,self.device,precision)
         self.pipeline.set_progress_bar_config(disable=True)
         self.steps=config.get('generation_steps',12)
         self.size=config.get('generation_size',256)
@@ -416,6 +488,17 @@ class GenerationEvaluator(Evaluator):
         if isinstance(self.size,bool) or not isinstance(self.size,int) or not 32<=self.size<=1024 or self.size%8:
             raise ValueError('generation_size must be a multiple of 8 from 32 to 1024.')
         self.min_clip_similarity=.25
+        if self.metric in ('combined','checks'):
+            from generation_judge import DEFAULT_JUDGE, create_judge
+            if shared is not None:
+                self.judge=shared.judge
+            else:
+                selection=config.get('_judge_model', {'source':'huggingface','name':config.get('judge_model',DEFAULT_JUDGE)})
+                self.judge=create_judge(selection,self.device)
+            if self.metric=='combined' and self.judge.kind not in ('qwen3_vl','vev'):
+                raise ValueError('Combined failure scoring requires a Vev or Qwen3-VL visual judge.')
+            self.scorer_identity=copy.deepcopy(self.judge.identity)
+            return
         if shared is not None:
             self.scorer,self.processor=shared.scorer,shared.processor
             self.scorer_identity=copy.deepcopy(shared.scorer_identity)
@@ -429,40 +512,140 @@ class GenerationEvaluator(Evaluator):
         self.processor=transformers.CLIPProcessor.from_pretrained(selection['name'],use_fast=False,**options)
         self.scorer_identity={'name':selection['name'],'revision':revision}
 
-    def predict(self,value,*,seed=0,artifact_name='sample'):
+    def set_runtime_callbacks(self, *, cancelled=None, on_model_call=None, progress=None):
+        """Keep cancellation and extra inference accounting local to this run."""
+        self._cancelled,self._on_model_call,self._progress=cancelled,on_model_call,progress
+        ready=getattr(getattr(self,'judge',None),'ensure_ready',None)
+        if callable(ready):
+            if progress is not None:
+                progress(phase='loading visual evaluator')
+            ready(cancelled=cancelled)
+            self.scorer_identity=copy.deepcopy(self.judge.identity)
+
+    def _check_cancelled(self):
+        if self._cancelled is not None and self._cancelled():
+            raise InterruptedError('Cancelled by user.')
+
+    def _render(self,value,seed):
+        self._check_cancelled()
         if not isinstance(value,str) or not value.strip():
             raise ValueError('Generation requires a nonempty prompt.')
         if len(self.pipeline.tokenizer.encode(value,verbose=False))>min(self.pipeline.tokenizer.model_max_length,self.pipeline.text_encoder.config.max_position_embeddings):
             raise ValueError('Generation prompt exceeds selected model token limit.')
-        if not isinstance(artifact_name,str) or not re.fullmatch(r'[A-Za-z0-9_-]+',artifact_name):
-            raise ValueError('Use a simple artifact name without path components.')
         generator=self.torch.Generator(device=self.device).manual_seed(seed)
         with self.torch.inference_mode():
-            output=self.pipeline(value,num_inference_steps=self.steps,height=self.size,width=self.size,generator=generator)
-            image=output.images[0]
-            inputs=self.processor(text=[value],images=[image],padding=True,truncation=False,return_tensors='pt').to(self.device)
-            if inputs['input_ids'].shape[-1]>self.scorer.config.text_config.max_position_embeddings:
-                raise ValueError('Prompt exceeds independent CLIP scorer token limit.')
-            embeddings=self.scorer(**inputs)
-            cosine=float((embeddings.image_embeds*embeddings.text_embeds).sum(-1)[0])
+            output=self._generation_runtime.render(value,steps=self.steps,size=self.size,generator=generator)
+        self._check_cancelled()
+        flagged=bool(output.nsfw_content_detected and output.nsfw_content_detected[0])
+        if self.metric=='combined' and flagged:
+            raise ValueError('The pipeline safety checker withheld this image; no failure score was recorded.')
+        return output.images[0],flagged
+
+    def _predict_comparison(self,value,*,checks,reference_prompt,seed,artifact_name):
+        from generation_failure import evaluate_requirements
+        self._check_cancelled()
+        if self._on_model_call is not None:
+            self._on_model_call()
+        image,_=self._render(value,seed)
+        result=evaluate_requirements(self.judge,image,checks,cancelled=self._cancelled)
+        # Comparison images are transient. Scores, input provenance and matched
+        # seeds are retained by the probe for reproducibility and inspection.
+        return {'content_failure':1-result['quality'], 'checks':result['checks'],
+                **({'check_evidence':result['check_evidence']} if 'check_evidence' in result else {})}
+
+    def predict(self,value,*,seed=0,artifact_name='sample',checks=None,reference_prompt=None,action=None):
+        if not isinstance(artifact_name,str) or not re.fullmatch(r'[A-Za-z0-9_-]+',artifact_name):
+            raise ValueError('Use a simple artifact name without path components.')
+        if self.metric in ('checks','combined'):
+            from generation_prompts import normalize_prompt_checks
+            checks=normalize_prompt_checks(checks)
+            if self.metric=='checks' and not checks:
+                raise ValueError('Visual requirement scoring needs questions and expected answers for this prompt.')
+        alignment_prompt=reference_prompt if reference_prompt is not None else value
+        if not isinstance(alignment_prompt,str) or not alignment_prompt.strip():
+            raise ValueError('Generation evaluation requires a nonempty reference prompt.')
+        image,flagged=self._render(value,seed)
+        filename=artifact_name+'.png'
+        if self.metric=='combined':
+            from generation_failure import assess_generation
+            result=assess_generation(self.judge,image,alignment_prompt,action=action,checks=checks,cancelled=self._cancelled)
+            comparison=self.bias_probe.evaluate(action,self._predict_comparison,
+                cancelled=self._cancelled,progress=self._progress)
+            result['failure_scores']['bias']=comparison['score']
+            result['failure_evidence']['bias']=comparison
+            result['quality']=1-max(score for score in result['failure_scores'].values() if score is not None)
+            self._check_cancelled()
+            image.save(self.directory/filename)
+            return {**result,'image':filename,'prompt':value,'reference_prompt':alignment_prompt,
+                    'action':copy.deepcopy(action),'seed':seed,'safety_filtered':flagged}
+        with self.torch.inference_mode():
+            if self.metric=='clip':
+                inputs=self.processor(text=[alignment_prompt],images=[image],padding=True,truncation=False,return_tensors='pt').to(self.device)
+                if inputs['input_ids'].shape[-1]>self.scorer.config.text_config.max_position_embeddings:
+                    raise ValueError('Prompt exceeds independent CLIP scorer token limit.')
+                embeddings=self.scorer(**inputs)
+                cosine=float((embeddings.image_embeds*embeddings.text_embeds).sum(-1)[0])
+        if self.metric=='checks':
+            from generation_failure import evaluate_requirements
+            result=evaluate_requirements(self.judge,image,checks,cancelled=self._cancelled)
+            image.save(self.directory/filename)
+            return {**result,'image':filename,'prompt':value,'seed':seed,'safety_filtered':flagged,
+                    'components':{'checks_passed':result['checks_passed'],'checks_total':result['checks_total']}}
         if not math.isfinite(cosine) or not -1.00001<=cosine<=1.00001:
             raise ValueError('CLIP returned invalid similarity.')
         cosine=max(-1.,min(1.,cosine))
-        filename=artifact_name+'.png'
         image.save(self.directory/filename)
-        flagged=bool(output.nsfw_content_detected and output.nsfw_content_detected[0])
         return {'image':filename,'prompt':value,'clip_similarity':cosine,'quality':(cosine+1)/2,
-                'seed':seed,'safety_filtered':flagged,'components':{'clip_similarity':cosine}}
+                'alignment_prompt':alignment_prompt,'seed':seed,'safety_filtered':flagged,'components':{'clip_similarity':cosine}}
 
     def score(self,output,baseline,*,target=None):
+        if self.metric=='combined':
+            from generation_failure import combined_score
+            return combined_score(output,baseline,self.threshold)
         quality,original=unit(output['quality']),unit(baseline['quality'])
         drop=max(0.,original-quality)
+        if self.metric=='checks':
+            return {'reward':.5*(1-quality)+.5*drop,'severity':1-quality,'failure':quality<1.,
+                    'criterion':self.criterion,'metrics':{**output['components'],'quality':quality,'quality_drop':drop,
+                    'baseline_quality':original,'safety_filtered':output.get('safety_filtered',False)}}
         return {'reward':.5*(1-quality)+.5*drop,'severity':1-quality,'failure':output['clip_similarity']<self.min_clip_similarity or drop>self.threshold,
                 'criterion':self.criterion,'metrics':{**output['components'],'quality':quality,'quality_drop':drop,
                 'baseline_clip_similarity':baseline['clip_similarity'],'safety_filtered':output.get('safety_filtered',False)}}
 
     def describe(self):
-        return {**super().describe(),'scorer':self.scorer_identity,'min_clip_similarity':self.min_clip_similarity,
+        generation={**self._generation_runtime.describe(),
+                    'generation_precision_requested':self.generation_precision_requested}
+        structured=getattr(getattr(self,'judge',None),'supports_decisions',False) is True
+        if hasattr(self,'judge'):
+            self.scorer_identity=copy.deepcopy(self.judge.identity)
+        answer_policy=('Binary questions use the yes/no decision; other expected answers are checked for visual '
+                       'support. P(yes)>=0.5 selects yes; otherwise no. These are '
+                       'uncalibrated model decisions, not generated answers.'
+                       if structured else 'Complete short-answer matching after case, punctuation and '
+                       'number-word normalization; empty judge outputs are errors.')
+        rubric=('Expected severity across five ordered levels (0 none to 4 severe), divided by 4.'
+                if structured else '0 none, 1 minor, 2 moderate, 3 major, 4 severe; divided by 4.')
+        if self.metric=='combined':
+            suite=self.config.get('generation_bias_suite')
+            return {**super().describe(),**generation,'scorer':self.scorer_identity,'generation_metric':'combined',
+                'reward_formula':'max(evaluated content, instructions, visual defects, matched-suite quality disparity)',
+                'threshold_policy':'Positive severity at or above the failure threshold flags a review candidate.',
+                'rubric':rubric+' Dataset content checks use failed fraction.',
+                'answer_policy':answer_policy,
+                'calibration':'Ordinal severity and observed disparity; not empirically calibrated failure probabilities.',
+                'baseline_policy':'Original severity and severity increase are reported separately; they do not dilute reward.',
+                'bias_policy':{'configured':bool(suite),'scope':'matched_suite_action','reference':'equal_error_rates' if suite else None,
+                               'repeats':self.config.get('generation_bias_repeats',3),
+                               'meaning':'Observed differences in content errors on explicitly matched prompt groups; no identity inference.'},
+                'seed_policy':'Same noise seed per original baseline/action; all matched groups share each case/repeat seed.'}
+        if self.metric=='checks':
+            return {**super().describe(),**generation,'scorer':self.scorer_identity,'generation_metric':'checks',
+                    'threshold_policy':'Any requirement the visual judge answers incorrectly flags a review candidate.',
+                    'reward_formula':'quality=passed checks/total checks; reward=0.5*(1-quality)+0.5*max(0,baseline quality-quality)',
+                    'answer_policy':answer_policy,
+                    'seed_policy':'same baseline and variant noise seed per original input'}
+        return {**super().describe(),**generation,'scorer':self.scorer_identity,'min_clip_similarity':self.min_clip_similarity,
+                'generation_metric':'clip','alignment_policy':'Compare baseline and variants with the same original scene prompt.',
                 'threshold_policy':'Uncalibrated CLIP cosine below 0.25 or quality drop above configured threshold flags review candidates.',
                 'reward_formula':'quality=(CLIP cosine+1)/2; reward=0.5*(1-quality)+0.5*max(0,baseline quality-quality)',
                 'seed_policy':'same baseline and variant noise seed per original input'}

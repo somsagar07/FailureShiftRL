@@ -114,12 +114,13 @@ class _TextEncoder:
         self.device = device
         return self
 
-    def _prepare(self, texts, prefix=''):
+    def _prepare(self, texts, prefix='', *, truncate=False):
         if not isinstance(texts, list) or not texts or not all(isinstance(text, str) for text in texts):
             raise ValueError('Provide a nonempty list of text inputs.')
-        inputs = self.tokenizer([prefix+text for text in texts], padding=True, truncation=False,
+        options = {'max_length': self.max_tokens} if truncate else {}
+        inputs = self.tokenizer([prefix+text for text in texts], padding=True, truncation=truncate,
                                 return_tensors='pt', return_attention_mask=True,
-                                return_token_type_ids=False, verbose=False)
+                                return_token_type_ids=False, verbose=False, **options)
         if 'input_ids' not in inputs or 'attention_mask' not in inputs:
             raise ValueError('The selected tokenizer must return input IDs and an attention mask.')
         ids, mask = inputs['input_ids'], inputs['attention_mask']
@@ -187,9 +188,9 @@ class SummarizationEncoder(_TextEncoder):
         if self.prefix:
             self.feature_method += f'; summarization prefix {self.prefix!r}'
 
-    def encode(self, texts):
+    def encode(self, texts, *, truncate=False):
         try:
-            inputs = self._prepare(texts, self.prefix)
+            inputs = self._prepare(texts, self.prefix, truncate=truncate)
             with self.torch.inference_mode():
                 output = self.encoder(**inputs, return_dict=True)
                 return self._pool(output, inputs['attention_mask'])
