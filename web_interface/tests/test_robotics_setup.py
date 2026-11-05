@@ -102,6 +102,36 @@ class RoboticsSetupTests(unittest.TestCase):
                     self.install()
                 self.assertFalse(self.runtime.exists())
 
+    def test_only_checksum_pinned_official_lerobot_source_is_allowed(self):
+        commit='a'*40;digest='b'*64
+        url=f'https://codeload.github.com/huggingface/lerobot/tar.gz/{commit}#sha256={digest}'
+        self.requirements.write_text('# Official source\nlerobot[smolvla] @ '+url+' # pinned archive\n')
+        pins=self.setup._pins(self.requirements)
+        self.assertEqual(pins[0].url,url)
+        for requirement in [
+            f'lerobot @ https://codeload.github.com/huggingface/lerobot/tar.gz/main#sha256={digest}',
+            f'lerobot @ https://codeload.github.com/huggingface/lerobot/tar.gz/{commit}',
+            f'lerobot @ https://example.com/lerobot/{commit}#sha256={digest}',
+            'lerobot @ git+https://github.com/huggingface/lerobot.git@main',
+            'robotics-probe @ '+url]:
+            self.requirements.write_text(requirement+'\n')
+            with self.assertRaisesRegex(ValueError,'source|pin|version'):
+                self.setup._pins(self.requirements)
+
+    def test_source_pin_checks_installed_archive_identity(self):
+        from types import SimpleNamespace
+        from packaging.requirements import Requirement
+        url='https://codeload.github.com/huggingface/lerobot/tar.gz/'+'a'*40
+        requirement=Requirement('lerobot @ '+url+'#sha256='+'b'*64)
+        good=dict(url=url,archive_info=dict(hashes=dict(sha256='b'*64)))
+        installed=SimpleNamespace(read_text=lambda name:json.dumps(good))
+        self.setup._validate_source_identity(requirement,installed)
+        for record in [None,{},dict(good,url='https://example.com/other'),
+                       dict(good,archive_info=dict(hashes=dict(sha256='c'*64)))]:
+            installed=SimpleNamespace(read_text=lambda name:json.dumps(record) if record else None)
+            with self.assertRaisesRegex(RuntimeError,'source|archive|identity'):
+                self.setup._validate_source_identity(requirement,installed)
+
     def test_dependency_extras_are_validated_before_publishing(self):
         self.requirements.write_text("robotics-probe[camera]==1.0\n")
         wheel(self.wheels, dependencies=("missing-camera-package>=1; extra == 'camera'",))

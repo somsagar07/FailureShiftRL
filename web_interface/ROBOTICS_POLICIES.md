@@ -26,6 +26,13 @@ fall back to bounded, explicitly labeled mapped-observation features. Large VLA
 checkpoints still require their compatible assets; recognizing a feature hook does
 not establish that a particular checkpoint has been evaluated here.
 
+The worker dependency lock uses an immutable official LeRobot source snapshot
+(`9e5ee9859480e425a97a6836bb3fee479539beb5`) with its SHA-256 checksum. The published
+0.6.1 release caps Pillow and Transformers below their security fixes. This snapshot
+accepts Pillow 13 and Transformers 5.22. Setup verifies the archive identity,
+dependency constraints, and native policy imports before activation; `--render`
+also checks EGL simulation. Torch and CUDA remain shared with the app environment.
+
 Episode means are L2-normalized. PCA is fitted from a bounded reservoir of baseline
 decision features and frozen for subsequent variations. DQN uses the full episode
 vectors, not their three displayed coordinates. The DQN checkpoint is separate from
@@ -172,5 +179,5 @@ and do not download large VLA weights.
 
 Native API references: [Robomimic 0.3 rollout implementation](https://github.com/ARISE-Initiative/robomimic/blob/v0.3.0/robomimic/algo/algo.py),
 [SB3 save format](https://stable-baselines3.readthedocs.io/en/master/guide/save_format.html),
-[LeRobot 0.6.1 policy and processor factory](https://github.com/huggingface/lerobot/blob/v0.6.1/src/lerobot/policies/factory.py),
-and [SmolVLA native processors](https://github.com/huggingface/lerobot/blob/v0.6.1/src/lerobot/policies/smolvla/processor_smolvla.py).
+[LeRobot policy and processor factory](https://github.com/huggingface/lerobot/blob/9e5ee9859480e425a97a6836bb3fee479539beb5/src/lerobot/policies/factory.py),
+and [SmolVLA native processors](https://github.com/huggingface/lerobot/blob/9e5ee9859480e425a97a6836bb3fee479539beb5/src/lerobot/policies/smolvla/processor_smolvla.py).

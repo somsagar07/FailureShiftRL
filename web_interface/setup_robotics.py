@@ -39,6 +39,27 @@ SMOKE_IMPORTS = {
     "lerobot.policies.pi0_fast.modeling_pi0_fast": ("PI0FastPolicy",),
 }
 
+# LeRobot's published release caps dependencies below current security fixes.
+# Accept only an immutable, SHA-256-pinned official source archive until release.
+SOURCE_ARCHIVE = re.compile(
+    r'https://codeload\.github\.com/huggingface/lerobot/tar\.gz/'
+    r'[0-9a-f]{40}#sha256=(?P<sha256>[0-9a-f]{64})')
+
+
+def _validate_source_identity(requirement, installed):
+    if not requirement.url:
+        return
+    match = SOURCE_ARCHIVE.fullmatch(requirement.url)
+    try:
+        provenance = json.loads(installed.read_text('direct_url.json') or '{}')
+        valid = (match is not None and isinstance(provenance, dict)
+                 and provenance.get('url') == requirement.url.split('#', 1)[0]
+                 and provenance.get('archive_info', {}).get('hashes', {}).get('sha256') == match['sha256'])
+    except (ValueError, TypeError, AttributeError):
+        valid = False
+    if not valid:
+        raise RuntimeError('The installed LeRobot source archive identity does not match its checksum pin.')
+
 
 def _canonical(name):
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -74,7 +95,8 @@ def _pins(requirements):
         raise RuntimeError("The robotics runtime requires Python 3.12 or newer.")
     pins = []
     for line in Path(requirements).read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
+        # A URL fragment is part of its checksum pin, not an inline comment.
+        line = re.sub(r"(^|\s+)#.*$", "", line).strip()
         if not line:
             continue
         item = Requirement(line)
@@ -83,7 +105,10 @@ def _pins(requirements):
         if _shared_only(item.name):
             raise ValueError(f"{item.name} must remain shared; Torch/CUDA cannot be installed here.")
         specifiers = list(item.specifier)
-        if item.url or len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
+        if item.url:
+            if _canonical(item.name) != 'lerobot' or not SOURCE_ARCHIVE.fullmatch(item.url):
+                raise ValueError('Source pins require an official LeRobot archive, full commit and SHA-256 checksum.')
+        elif len(specifiers) != 1 or specifiers[0].operator != "==" or "*" in specifiers[0].version:
             raise ValueError(f"Robotics requirements need exact package==version pins: {line}")
         pins.append(item)
     if not pins:
@@ -160,6 +185,7 @@ def _validate_dependencies(runtime, pins):
         if installed is None or not item.specifier.contains(installed.version, prereleases=True):
             actual = installed.version if installed else "not installed"
             raise RuntimeError(f"{parent} requires {item}; found {actual}.")
+        _validate_source_identity(item, installed)
         for active_extra in ("", *sorted(item.extras)):
             key = (name, active_extra)
             if key in checked:

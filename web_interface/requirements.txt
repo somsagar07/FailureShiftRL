@@ -1,5 +1,6 @@
 # Local analysis, DQN discovery, and reviewed model fine-tuning.
-Pillow>=10,<13
+# Pillow 13 fixes the image-decoder memory-safety advisories affecting 12.3.
+Pillow>=13,<14
 # HTTPS trust-store fix for GHSA-6q48-6c7w-9gw2.
 certifi>=2026.10.19
 huggingface_hub>=0.34,<1
