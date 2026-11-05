@@ -113,6 +113,25 @@ test('predicted landscape colors untested inputs and actions without mixing meas
   assert.equal(fill('action',9),'#9aa1a9','another input must not inherit the previous input prediction');
 });
 
+test('pending positions keep gray dashed boundaries and links through selection and discovery updates',()=>{
+  const {view,canvas}=setup();view.setData([point(0,[-1,0,0]),point(1,[1,0,0])]);view.focus(0);
+  view.setExpansion(0,[{...action(4,[-.5,.5,0]),pending:true},action(9,[.5,.5,0])]);
+  view.setLandscapeMode('measured');
+  const pending=()=>view.projected.find(node=>node.kind==='action'&&node.data.id===4);
+  const rim=()=>canvas.context.strokes.find(stroke=>stroke.path.some(p=>p.x===pending().x&&p.y===pending().y&&p.radius===pending().radius));
+  for(const job of [{status:'running',current:{input_index:0,action_id:4},records:[]},{status:'completed',records:[{input_index:0,action_id:9,severity:1}]}]) {
+    view.setDiscovery(job);view.selectAction(4);
+    assert.equal(rim().color,'#7d8792','placeholder position must not imply measured feature variation');
+    assert.deepEqual(Array.from(rim().dashes),[4,3]);
+    assert.equal(circles(canvas)[view.projected.indexOf(pending())].color,'#9aa1a9');
+    assert.ok(canvas.context.strokes.some(stroke=>stroke.path.length===2&&stroke.color==='#9aa1a9'&&stroke.dashes.length),'the placeholder connection also distinguishes unknown position');
+    assert.ok(canvas.context.strokes.some(stroke=>stroke.color==='#202a35'&&stroke.path.some(p=>p.radius>pending().radius)),'selection remains visible outside the pending boundary');
+  }
+  view.setExpansion(0,[action(4,[-.5,.5,0]),action(9,[.5,.5,0])]);
+  assert.notEqual(rim().color,'#7d8792','a measured position clears the pending boundary');
+  assert.ok(!canvas.context.strokes.some(stroke=>stroke.path.length===2&&stroke.dashes.length),'measured feature connections are solid');
+});
+
 test('perspective makes the near sample larger and draws it last', () => {
   const {view, canvas} = setup();
   view.setData([point(0, [0, 0, 1]), point(1, [0, 0, -1])]);

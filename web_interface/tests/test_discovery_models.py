@@ -153,6 +153,39 @@ class EvaluatorTests(unittest.TestCase):
         self.assertIn('reference',loss['criterion'])
         self.assertEqual(evaluator.score(empty,empty)['reward'],.5)
 
+    def test_unstable_grounding_does_not_drive_the_search_reward(self):
+        from types import SimpleNamespace
+        evaluator=self.evaluator('summarization',reference_summary='a cat',source_text='a cat',summary_metric='reference')
+        evaluator.metric='grounded'
+        evaluator.nli=SimpleNamespace(assess=lambda *args: {
+            'source_support': .04, 'reliable': False, 'format_delta': .91, 'claims': [],
+            'warnings': [{'code':'format_sensitive','message':'Line breaks change the score.'}]},
+            score=lambda *args: .04)
+        output=evaluator.measure_summary('a cat')
+        self.assertEqual(output['quality'],1., 'An unstable NLI value must not manufacture a failure reward')
+        self.assertFalse(output['grounding']['reliable'])
+        self.assertEqual(output['components']['source_support'],.04, 'Keep the observed value for inspection')
+        self.assertFalse(output['components']['grounding_used'])
+
+    def test_summary_reports_truncation_and_scores_only_the_source_visible_to_the_model(self):
+        evaluator=self.evaluator('summarization',dataset_id='fixture',summary_metric='reference',max_new_tokens=3)
+        evaluator.encoder.max_tokens=8
+        source='a cat in the garden '*10+' 987654'
+        result=evaluator.predict(source,reference_summary='a cat')
+        self.assertIn('input_coverage',result)
+        self.assertTrue(result['input_coverage']['truncated'])
+        self.assertGreater(result['input_coverage']['source_tokens'],8)
+        self.assertEqual(result['input_coverage']['model_tokens'],8)
+        self.assertEqual(result['input_coverage']['evaluated_source'],'visible')
+
+    def test_summary_numeric_evidence_keeps_possible_inferences_as_review_warnings(self):
+        evaluator=self.evaluator('summarization',reference_summary='There were 50 people.',
+                                 source_text='20 people came early and 30 came late.',summary_metric='reference')
+        result=evaluator.measure_summary('There were 50 people.')
+        self.assertIn('summary_checks',result)
+        self.assertEqual(result['summary_checks']['new_numeric_literals'],['50'])
+        self.assertIn('inferred',result['summary_checks']['warnings'][0]['message'])
+
     def test_summary_generation_overrides_conflicting_checkpoint_defaults(self):
         evaluator=self.evaluator('summarization',reference_summary='a cat',max_new_tokens=4)
         config=evaluator.model.generation_config
@@ -182,6 +215,30 @@ class EvaluatorTests(unittest.TestCase):
         self.assertFalse(any('min_length' in str(item.message) or 'generation flags' in str(item.message) for item in caught),caught)
         self.assertEqual(config.min_length,56)
         self.assertEqual(config.num_beams,4)
+
+    def test_summary_generation_ignores_checkpoint_diagnostic_outputs(self):
+        expected=self.evaluator('summarization',reference_summary='a cat',max_new_tokens=4).predict('a cat')
+        source=Path(self.scratch.name)/'diagnostic-summary'
+        model=T5ForConditionalGeneration.from_pretrained(self.summary,local_files_only=True)
+        flags=('return_dict_in_generate','output_scores','output_logits','output_attentions','output_hidden_states')
+        for flag in flags:
+            setattr(model.generation_config,flag,True)
+        model.save_pretrained(source)
+        save_tokenizer(source)
+        evaluator=dm.create_evaluator(self.model('summarization',source),
+            {'task':'summarization','device':'cpu','reference_summary':'a cat','max_new_tokens':4},self.scratch.name)
+        self.addCleanup(evaluator.close)
+        generate=evaluator.model.generate
+        def observed(*args,**kwargs):
+            output=generate(*args,**kwargs)
+            self.assertTrue(torch.is_tensor(output),
+                            'Review inference must return token IDs without retaining diagnostic tensors.')
+            return output
+        with patch.object(evaluator.model,'generate',side_effect=observed):
+            actual=evaluator.predict('a cat')
+        self.assertEqual(actual,expected)
+        self.assertTrue(all(getattr(evaluator.model.generation_config,flag) for flag in flags),
+                        'Evaluation must preserve the checkpoint generation settings.')
 
     def test_summary_generation_respects_decoder_position_capacity(self):
         from transformers import (BartConfig, BartForConditionalGeneration, BertConfig,
@@ -286,7 +343,7 @@ class EvaluatorTests(unittest.TestCase):
             summary_metric='grounded',max_new_tokens=3,_nli_model={'source':'local','name':str(path)})
         measured=evaluator.measure_summary('a cat')
         self.assertGreater(measured['components']['source_support'],.99)
-        with patch.object(evaluator.nli,'score',wraps=evaluator.nli.score) as observed:
+        with patch.object(evaluator.nli,'assess',wraps=evaluator.nli.assess) as observed:
             evaluator.predict('a dog runs')
         self.assertEqual(observed.call_args.args[0],'a dog runs')
         self.assertIn('evaluated input',evaluator.describe()['grounding_policy'])

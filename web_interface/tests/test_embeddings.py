@@ -182,7 +182,10 @@ class EmbeddingTests(unittest.TestCase):
         manager = EmbeddingManager(self.previews, self.root/'spill-error', PixelEncoder,
                                   feature_memory_bytes=0, feature_disk_bytes=1024)
         preview = self.preview()
-        with patch.object(self.previews.datasets, 'labels', side_effect=ValueError('Unreadable dataset labels')):
+        # Vocabulary discovery now reads metadata before allocating features.
+        # Fail the later graph-label read to still exercise spill cleanup.
+        initial_labels = self.previews.datasets.labels(preview['config']['dataset_id'])
+        with patch.object(self.previews.datasets, 'labels', side_effect=[initial_labels,ValueError('Unreadable dataset labels')]):
             job = manager.start(preview['id'], device='cpu')
             result = self.wait(lambda: manager.get(job['id']))
         self.assertEqual(result['status'], 'error')

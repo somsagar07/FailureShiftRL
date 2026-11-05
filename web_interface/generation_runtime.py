@@ -17,11 +17,12 @@ class GenerationRuntime:
     """
     CACHE_BYTES = 8 * 1024 * 1024
 
-    def __init__(self, pipeline, encoder, device, precision, *, cache_bytes=CACHE_BYTES):
+    def __init__(self, pipeline, encoder, device, precision, *, cache_bytes=CACHE_BYTES, guidance_scale=7.5):
         self.pipeline = pipeline
         self.torch = encoder.torch
         self.device = device
         self.precision = precision
+        self.guidance_scale = guidance_scale
         self.cache_limit_bytes = cache_bytes
         self._scope = None
         self._prompts = OrderedDict()
@@ -51,7 +52,7 @@ class GenerationRuntime:
 
     def conditioning(self, prompt):
         pipeline = self.pipeline
-        guidance = getattr(pipeline.unet.config, 'time_cond_proj_dim', None) is None
+        guidance = self.guidance_scale > 1 and getattr(pipeline.unet.config, 'time_cond_proj_dim', None) is None
         scope = (id(pipeline), id(pipeline.text_encoder), id(pipeline.tokenizer),
                  self.device, str(pipeline.text_encoder.device), pipeline.text_encoder.dtype,
                  str(pipeline.unet.device), pipeline.unet.dtype, guidance)
@@ -99,7 +100,8 @@ class GenerationRuntime:
         guard = self.pipeline.vae.decoder.register_forward_hook(validate_decoder_output)
         try:
             output = self.pipeline(prompt_embeds=positive, negative_prompt_embeds=negative,
-                num_inference_steps=steps, height=size, width=size, generator=generator, output_type='np')
+                num_inference_steps=steps, height=size, width=size, generator=generator,
+                guidance_scale=self.guidance_scale, output_type='np')
         finally:
             guard.remove()
         # PIL conversion would turn NaNs into ordinary black pixels. Validate
@@ -110,5 +112,5 @@ class GenerationRuntime:
         return output
 
     def describe(self):
-        return {'generation_precision': self.precision,
+        return {'generation_precision': self.precision, 'guidance_scale':self.guidance_scale,
                 'conditioning_cache': {'max_bytes': self.cache_limit_bytes, 'storage': 'cpu'}}

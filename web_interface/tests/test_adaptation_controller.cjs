@@ -16,7 +16,7 @@ function setup(task='classification') {
   const explorer={task,job:{id:'emb1'},point:null,view:{setAdaptation:ids=>rings.push([...ids])},focusMeasured:(...args)=>focuses.push(args),describeAction:action=>action.name||`Rotation ${action.rotation}`};
   const discovery={active:false,attached:true,trainingActive:false,job:{id:'dis1',embedding_id:'emb1',task,status:'completed',records:[{input_index:0,action_id:4}]},startTraining:config=>training.push(config)};
   const api=async(url,body)=>{calls.push({url,body});const value=responses.shift();if(value instanceof Error)throw value;if(typeof value==='function')return value();if(!value)throw Error('Unexpected API call');return value;};
-  for(const [id,value] of Object.entries({'finetune-epochs':'1','finetune-lr':'0.001','finetune-device':'auto','finetune-batch-size':'auto','finetune-seed':'42','finetune-weight-decay':'0.01','finetune-max-grad-norm':'1'}))get(id).value=value;
+  for(const [id,value] of Object.entries({'finetune-epochs':'1','finetune-lr':'0.001','finetune-device':'auto','finetune-batch-size':'auto','finetune-seed':'42','finetune-weight-decay':'0.01','finetune-max-grad-norm':'1','finetune-generation-size':'auto','finetune-generation-framing':'preserve'}))get(id).value=value;
   get('finetune-cleanup').checked=true;
   const controller=new Controller({api,explorer,discovery});
   const summary={discovery_id:'dis1',embedding_id:'emb1',task,input_count:task==='classification'?50:1,max_examples:null,
@@ -30,6 +30,42 @@ const tests=[];const test=(name,fn)=>tests.push({name,fn});
 const plain=value=>JSON.parse(JSON.stringify(value));
 const content=el=>[el.textContent,...el.children.map(content)].join(' ');
 async function open(f){f.responses.push(f.summary);await f.controller.show();}
+
+test('generation training resolution and framing are validated without leaking to other domains',async()=>{
+  const f=setup('generation'),{controller:c,get}=f;await open(f);c.targets.set(4,'/data/target.png');c.controls();
+  assert.equal(get('finetune-generation-options').hidden,false);assert.equal(get('adapt-validation-fields').hidden,false);
+  assert.equal(c.trainingSettings().generation_size,'auto');assert.equal(c.trainingSettings().generation_framing,'preserve');
+  for(const size of ['256','512','768','1024']){get('finetune-generation-size').value=size;assert.equal(c.trainingSettings().generation_size,Number(size));}
+  get('finetune-generation-framing').value='center_crop';assert.equal(c.trainingSettings().generation_framing,'center_crop');
+  get('finetune-generation-size').value='128';get('finetune-generation-size').events.change();
+  assert.equal(get('finetune-start').disabled,true);assert.match(get('adapt-training-blocker').textContent,/resolution|size/i);
+  get('finetune-generation-size').value='auto';get('finetune-generation-framing').value='stretch';get('finetune-generation-framing').events.change();
+  assert.equal(get('finetune-start').disabled,true);assert.match(get('adapt-training-blocker').textContent,/framing/i);
+  for(const task of ['classification','summarization']){
+    const other=setup(task);await open(other);other.get('adapt-validation-prompts').value='A held-out scene';
+    assert.equal(other.get('finetune-generation-options').hidden,true);assert.equal(other.get('adapt-validation-fields').hidden,true);
+    assert.equal(Object.hasOwn(other.controller.trainingSettings(),'generation_size'),false);
+    assert.equal(Object.hasOwn(other.controller.trainingSettings(),'generation_framing'),false);
+    assert.equal(Object.hasOwn(other.controller.trainingConfig(),'validation_data'),false);
+  }
+});
+
+test('optional held-out generation prompts normalize lines and block duplicate or oversized suites',async()=>{
+  const f=setup('generation'),{controller:c,get}=f;await open(f);c.targets.set(4,'/data/target.png');c.controls();
+  assert.equal(Object.hasOwn(c.trainingConfig(),'validation_data'),false);
+  get('adapt-validation-prompts').value='  A red bird on a branch.  \n\n A blue cup beside a vase.\r\n';
+  get('adapt-validation-prompts').events.input?.();
+  assert.deepEqual(plain(c.trainingConfig().validation_data??null),[{prompt:'A red bird on a branch.'},{prompt:'A blue cup beside a vase.'}]);
+  assert.equal(c.trainingConfig().validation_repeats,1);assert.equal(get('finetune-start').disabled,false);
+  get('adapt-validation-prompts').value='A red bird\n a  RED   bird ';get('adapt-validation-prompts').events.input();
+  assert.equal(get('finetune-start').disabled,true);assert.match(get('adapt-training-blocker').textContent,/duplicate/i);
+  get('adapt-validation-prompts').value=Array.from({length:65},(_,i)=>`Unseen scene ${i}`).join('\n');get('adapt-validation-prompts').events.input();
+  assert.equal(get('finetune-start').disabled,true);assert.match(get('adapt-training-blocker').textContent,/64/);
+  get('adapt-validation-prompts').value='  \n \r\n';assert.equal(Object.hasOwn(c.trainingConfig(),'validation_data'),false);
+  get('adapt-validation-prompts').value='A held-out scene';get('adapt-data-source').value='json';get('adapt-data-source').events.change();
+  assert.equal(get('adapt-validation-prompts').value,'','changing the training source clears its holdout');
+  get('adapt-validation-prompts').value='Another held-out scene';c.reset();assert.equal(get('adapt-validation-prompts').value,'');
+});
 
 test('generation datasets require explicit prompt/action target pairs and count only supplied pairs',async()=>{
   const f=setup('generation'),{controller:c,get}=f;

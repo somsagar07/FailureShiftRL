@@ -12,13 +12,14 @@ class AdaptationController {
     bind('adapt-toggle-action','click',()=>this.toggle(this.graphAction));
     bind('adapt-graph-toggle','click',()=>this.toggle(this.graphAction));
     bind('adapt-action-choice','change',()=>{const value=this.el('adapt-action-choice').value;this.setGraphAction(null,value===''?null:Number(value));});
-    bind('adapt-data-source','change',()=>{this.fileRead++;this.reading=false;this.message('');this.renderTargets();this.controls();});
+    bind('adapt-data-source','change',()=>{this.fileRead++;this.reading=false;this.el('adapt-validation-prompts').value='';this.message('');this.renderTargets();this.controls();});
     bind('adapt-include-originals','change',()=>this.controls());
     bind('adapt-summary-reference','input',()=>this.controls());
+    bind('adapt-validation-prompts','input',()=>this.controls());
     bind('adapt-data-json','input',()=>{this.fileRead++;this.reading=false;this.message('');this.controls();});
     bind('adapt-data-file','change',()=>this.upload());
     for(const id of ['finetune-epochs','finetune-lr','finetune-seed','finetune-weight-decay','finetune-max-grad-norm'])bind(id,'input',()=>this.controls());
-    for(const id of ['finetune-device','finetune-batch-size','finetune-cleanup'])bind(id,'change',()=>this.controls());
+    for(const id of ['finetune-device','finetune-batch-size','finetune-cleanup','finetune-generation-size','finetune-generation-framing'])bind(id,'change',()=>this.controls());
     this.controls();
   }
   get available() {
@@ -33,6 +34,7 @@ class AdaptationController {
     this.version++;this.fileRead++;this.loading=false;this.reading=false;this.open=Boolean(this.discovery.trainingActive);
     this.summary=null;this.selected.clear();this.targets.clear();this.targetFields.clear();this.graphAction=null;
     this.el('adapt-data-json').value='';this.el('adapt-data-file').value='';this.el('adapt-selection').replaceChildren();
+    this.el('adapt-validation-prompts').value='';
     this.el('adapt-targets').replaceChildren();this.message('');this.syncGraph();this.controls();
   }
   message(value) {this.el('adapt-error').textContent=value;this.el('adapt-error').hidden=!value;}
@@ -51,6 +53,7 @@ class AdaptationController {
       this.el('adapt-data-source').value=this.generationDataset?'json':'current';
       this.el('adapt-summary-reference').value=summary.defaults.reference_summary||'';
       this.el('adapt-data-json').value='';this.el('adapt-data-file').value='';
+      this.el('adapt-validation-prompts').value='';
       this.renderActions();this.renderTargets();this.syncGraph();
       const first=this.selected.values().next().value;
       if(graphSelection===this.graphSelection&&this.graphAction===null) {
@@ -172,6 +175,7 @@ class AdaptationController {
       if(file.size>20*1024*1024)throw Error('Use training JSON under 20 MB.');
       const text=await file.text();if(read!==this.fileRead)return;
       const records=this.parseDataset(text);this.el('adapt-data-json').value=JSON.stringify(records);
+      this.el('adapt-validation-prompts').value='';
       this.el('adapt-data-source').value='json';this.message('');this.renderTargets();
     } catch(error){if(read===this.fileRead)this.message(`File not applied. ${error.message}`);}
     finally{if(read===this.fileRead){this.reading=false;this.controls();}}
@@ -221,6 +225,11 @@ class AdaptationController {
       }
       if(action_ids.some(id=>!records.some(row=>row.action_id===id)))throw Error('Add desired reference images for every selected action.');
       config.training_data=records;count=records.length;
+      const prompts=this.el('adapt-validation-prompts').value.split(/\r?\n/).map(value=>value.trim()).filter(Boolean);
+      if(prompts.length>64)throw Error('Use at most 64 unseen validation prompts.');
+      const unique=new Set(prompts.map(prompt=>prompt.replace(/\s+/g,' ').toLowerCase()));
+      if(unique.size!==prompts.length)throw Error('Remove duplicate validation prompts (ignoring case and whitespace).');
+      if(prompts.length){config.validation_data=prompts.map(prompt=>({prompt}));config.validation_repeats=1;}
     }
     // A running older server may still advertise its former materialization limit.
     if(Number.isFinite(this.summary.max_examples)&&this.summary.max_examples>0&&count>this.summary.max_examples)
@@ -240,10 +249,20 @@ class AdaptationController {
     if(!Number.isInteger(seed)||seed<0||seed>4294967295)throw Error('Choose a whole training seed from 0 to 4294967295.');
     if(!Number.isFinite(weight_decay)||weight_decay<0||weight_decay>1)throw Error('Choose weight decay from 0 to 1.');
     if(!Number.isFinite(max_grad_norm)||max_grad_norm<0||max_grad_norm>100)throw Error('Choose a gradient clipping norm from 0 to 100 (0 disables clipping).');
-    return {epochs,learning_rate,device,batch_size,seed,weight_decay,max_grad_norm,cleanup_after_finetune:this.el('finetune-cleanup').checked};
+    const settings={epochs,learning_rate,device,batch_size,seed,weight_decay,max_grad_norm,cleanup_after_finetune:this.el('finetune-cleanup').checked};
+    if(this.task==='generation') {
+      const size=this.el('finetune-generation-size').value||'auto',generation_size=size==='auto'?'auto':Number(size);
+      const generation_framing=this.el('finetune-generation-framing').value||'preserve';
+      if(generation_size!=='auto'&&![256,512,768,1024].includes(generation_size))throw Error('Choose Automatic or a training resolution of 256, 512, 768, or 1024.');
+      if(!['preserve','center_crop'].includes(generation_framing))throw Error('Choose Preserve full image or Center crop for target framing.');
+      Object.assign(settings,{generation_size,generation_framing});
+    }
+    return settings;
   }
   controls() {
     const active=Boolean(this.discovery.active),current=this.current;
+    this.el('finetune-generation-options').hidden=this.task!=='generation';
+    this.el('adapt-validation-fields').hidden=this.task!=='generation';
     this.el('adapt').disabled=(!this.available&&!this.discovery.trainingActive)||(active&&!this.discovery.trainingActive);
     this.el('adapt').setAttribute('aria-expanded',String(this.open));
     this.el('adapt').setAttribute('aria-pressed',String(this.open));

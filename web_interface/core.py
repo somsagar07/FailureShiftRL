@@ -1,39 +1,32 @@
 """Small, deterministic search primitives; importing this module loads no model."""
 import itertools
+import io
 import math
 import random
 import re
 import string
 from collections import Counter
 
+from action_catalog import (DEFAULT_IMAGE_SPACE, DEFAULT_GENERATION_DIMENSIONS, DEFAULT_TEXT_ACTIONS,
+                            GENERATION_STYLES, GENERATION_DIMENSIONS, IMAGE_DIMENSIONS,
+                            INTEGER_IMAGE_DIMENSIONS, TEXT_ACTIONS, available_action_space,
+                            action_metadata, action_semantic_risks)
 
-MAX_ACTIONS = 500
-IMAGE_DIMENSIONS = {'rotation': (-180, 180, 0), 'darkness': (0, 1, 0), 'saturation': (0, 3, 1)}
-GENERATION_STYLES = ['photograph', 'watercolor', 'pencil drawing', 'digital illustration', '3D render']
-GENERATION_DIMENSIONS = dict(style=GENERATION_STYLES,
-    lighting=['even', 'soft', 'directional', 'high-key', 'low-key'],
-    detail=['minimal', 'simple', 'moderate', 'detailed', 'intricate'])
+
+MAX_ACTIONS = 5000
 LEGACY_GENERATION_SPACE = dict(description=['unique', 'distinctive', 'cool'],
                                profession=['scientist', 'artist', 'professor'],
                                setting=['corporate office', 'research center', 'classroom'])
 
 
-TEXT_ACTIONS = [
-    'drop_stop_words', 'remove_punctuation', 'to_lowercase', 'negate_sentence',
-    'delete_random_character', 'insert_random_character', 'change_letter_case',
-    'apply_misspellings', 'repeat_random_character', 'replace_with_adjacent_character',
-    'swap_random_character', 'delete_random_word', 'perturb_word_order', 'repeat_random_word',
-]
-
-
 def default_action_space(task):
     if task == 'classification':
         # Same order and values as Experiments/Classification/config.py.
-        return dict(rotation=[-10, -5, 0, 5, 10], darkness=[.1, .2, .3, .4, .5], saturation=[.5, .55, .6, .65, .7])
+        return {key: list(values) for key, values in DEFAULT_IMAGE_SPACE.items()}
     if task == 'summarization':
-        return {'actions': list(TEXT_ACTIONS)}
+        return {'actions': list(DEFAULT_TEXT_ACTIONS)}
     if task == 'generation':
-        return {key:list(values) for key,values in GENERATION_DIMENSIONS.items()}
+        return {key:list(values) for key,values in DEFAULT_GENERATION_DIMENSIONS.items()}
     raise ValueError('Unknown task.')
 
 
@@ -46,20 +39,24 @@ def normalize_action_space(task, space=None):
         defaults = LEGACY_GENERATION_SPACE
     elif task == 'generation' and isinstance(space, dict) and set(space) == {'styles'}:
         defaults = {'styles': GENERATION_STYLES}
-    if not isinstance(space, dict) or set(space) != set(defaults):
-        raise ValueError('Action space must contain: ' + ', '.join(defaults) + '.')
-    grouped_generation = task == 'generation' and set(defaults) == set(GENERATION_DIMENSIONS)
+    grouped_generation = task == 'generation' and set(defaults) == set(DEFAULT_GENERATION_DIMENSIONS)
+    allowed = (IMAGE_DIMENSIONS if task == 'classification' else
+               GENERATION_DIMENSIONS if grouped_generation else defaults)
+    if not isinstance(space, dict) or not set(defaults) <= set(space) or set(space) - set(allowed):
+        raise ValueError('Action space must contain: ' + ', '.join(defaults) + '; use only available optional groups.')
     allow_disabled = task == 'classification' or grouped_generation
     normalized = {}
-    for key, values in space.items():
-        if not isinstance(values, list) or len(values) > 25:
-            raise ValueError(f'{key}: use a list of at most 25 values.')
+    for key in allowed:
+        if key not in space:
+            continue
+        values = space[key]
+        limit = len(TEXT_ACTIONS) if task == 'summarization' else 25
+        if not isinstance(values, list) or len(values) > limit:
+            raise ValueError(f'{key}: use a list of at most {limit} values.')
         cleaned = []
         for value in values:
             if task == 'classification':
-                low, high, _ = IMAGE_DIMENSIONS[key]
-                if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
-                    raise ValueError(f'{key}: values must be numbers between {low} and {high}.')
+                _validate_image_value(key, value)
             else:
                 if not isinstance(value, str) or not value.strip() or len(value) > 80 or any(ord(c) < 32 for c in value):
                     raise ValueError(f'{key}: enter nonempty text values of up to 80 characters.')
@@ -90,19 +87,30 @@ def actions_for(task, space=None):
         return [dict(id=TEXT_ACTIONS.index(name), name=name) for name in space['actions']]
     if task == 'generation' and 'styles' in space:
         return [dict(id=GENERATION_STYLES.index(style), style=style) for style in space['styles']]
-    if task == 'generation' and set(space) == set(GENERATION_DIMENSIONS):
-        keys = list(GENERATION_DIMENSIONS)
+    if task == 'generation' and set(space) <= set(GENERATION_DIMENSIONS):
+        # Keep the original three digits in their original positions. Optional
+        # axes occupy higher digits, so saved IDs do not change as catalog grows.
+        keys = [key for key in GENERATION_DIMENSIONS if key in DEFAULT_GENERATION_DIMENSIONS or space.get(key)]
         actions = []
         for combination in itertools.product(*(space[key] or [None] for key in keys)):
             # Reserve zero in each axis for an omitted instruction. IDs remain
             # stable when values are filtered or another group is removed.
             identity = 0
-            for key, value in zip(keys, combination):
-                values = GENERATION_DIMENSIONS[key]
+            chosen = dict(zip(keys, combination))
+            for key, values in DEFAULT_GENERATION_DIMENSIONS.items():
+                value = chosen[key]
                 identity = identity * (len(values)+1) + (values.index(value)+1 if value is not None else 0)
+            multiplier = math.prod(len(values)+1 for values in DEFAULT_GENERATION_DIMENSIONS.values())
+            for key, values in GENERATION_DIMENSIONS.items():
+                if key in DEFAULT_GENERATION_DIMENSIONS:
+                    continue
+                value = chosen.get(key)
+                identity += multiplier * (values.index(value)+1 if value is not None else 0)
+                multiplier *= len(values)+1
             actions.append(dict(id=identity, **dict(zip(keys, combination))))
         return actions
-    keys = list(LEGACY_GENERATION_SPACE if task == 'generation' else default_action_space(task))
+    keys = (list(LEGACY_GENERATION_SPACE) if task == 'generation' else
+            [key for key in IMAGE_DIMENSIONS if key in DEFAULT_IMAGE_SPACE or space.get(key)])
     values = [space[key] or [IMAGE_DIMENSIONS[key][2]] for key in keys]
     return [dict(id=i, **dict(zip(keys, combination))) for i, combination in enumerate(itertools.product(*values))]
 
@@ -135,16 +143,100 @@ def classification_outcome(baseline_id, predicted_id, expected_id):
 
 
 def apply_image(image, action):
-    from PIL import ImageEnhance
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    if not isinstance(action, dict) or set(action) - set(IMAGE_DIMENSIONS) - {'id'}:
+        raise ValueError('Choose only available image transformations.')
+    for name, value in action.items():
+        if name != 'id':
+            _validate_image_value(name, value)
+    values = {name: action.get(name, bounds[2]) for name, bounds in IMAGE_DIMENSIONS.items()}
+    if all(values[name] == bounds[2] for name, bounds in IMAGE_DIMENSIONS.items()):
+        return image.copy()
+    original_mode = image.mode
+    result = image if image.mode in ('RGB', 'RGBA', 'L', 'LA') else image.convert('RGB')
     # Research pipeline: rotate -> saturation -> darken, on a 224px square.
-    result = image.rotate(action['rotation'])
-    result = ImageEnhance.Color(result).enhance(action['saturation'])
-    return ImageEnhance.Brightness(result).enhance(1 - action['darkness'])
+    result = result.rotate(values['rotation'])
+    result = ImageEnhance.Color(result).enhance(values['saturation'])
+    result = ImageEnhance.Brightness(result).enhance(1 - values['darkness'])
+    # Fixed order is independent of JSON ordering and catalog selection. Alpha
+    # is retained for photometric edits and transformed with spatial edits.
+    for name, enhancer in [('brightness', ImageEnhance.Brightness), ('contrast', ImageEnhance.Contrast),
+                           ('sharpness', ImageEnhance.Sharpness)]:
+        if values[name] != 1:
+            result = enhancer(result).enhance(values[name])
+    if values['gaussian_blur']:
+        result = _map_image_color(result, lambda color: color.filter(ImageFilter.GaussianBlur(values['gaussian_blur'])))
+    if values['gaussian_noise']:
+        import numpy as np
+        def noise(color):
+            pixels = np.asarray(color, dtype=np.float32)
+            perturbation = np.random.default_rng(42).normal(0, values['gaussian_noise']*255, pixels.shape)
+            return Image.fromarray(np.clip(pixels+perturbation, 0, 255).astype(np.uint8))
+        result = _map_image_color(result, noise)
+    if values['jpeg_quality'] != 100:
+        def compress(color):
+            with io.BytesIO() as buffer:
+                color.save(buffer, format='JPEG', quality=int(values['jpeg_quality']))
+                buffer.seek(0)
+                with Image.open(buffer) as decoded:
+                    return decoded.convert(color.mode)
+        result = _map_image_color(result, compress)
+    if values['pixelation'] != 1:
+        factor = values['pixelation']
+        size = (max(1, round(result.width/factor)), max(1, round(result.height/factor)))
+        result = result.resize(size, Image.Resampling.BOX).resize(result.size, Image.Resampling.NEAREST)
+    if values['hue_shift']:
+        import numpy as np
+        def shift_hue(color):
+            if color.mode == 'L':
+                return color.copy()
+            hsv = np.asarray(color.convert('HSV')).copy()
+            hsv[..., 0] = (hsv[..., 0].astype(np.int16)+round(values['hue_shift']*256)) % 256
+            return Image.frombytes('HSV', color.size, hsv.tobytes()).convert('RGB')
+        result = _map_image_color(result, shift_hue)
+    if values['grayscale']:
+        result = ImageEnhance.Color(result).enhance(1-values['grayscale'])
+    if values['invert']:
+        result = _map_image_color(result, lambda color: Image.blend(color, ImageOps.invert(color), values['invert']))
+    if values['posterize_bits'] != 8:
+        result = _map_image_color(result, lambda color: ImageOps.posterize(color, int(values['posterize_bits'])))
+    if values['solarize_threshold'] != 256:
+        result = _map_image_color(result, lambda color: ImageOps.solarize(color, int(values['solarize_threshold'])))
+    if values['translate_x'] or values['translate_y']:
+        offset = (1, 0, -values['translate_x']*result.width, 0, 1, -values['translate_y']*result.height)
+        result = result.transform(result.size, Image.Transform.AFFINE, offset, Image.Resampling.BICUBIC)
+    if values['zoom'] != 1:
+        scale = 1/values['zoom']
+        matrix = (scale, 0, (result.width-1)*(1-scale)/2, 0, scale, (result.height-1)*(1-scale)/2)
+        result = result.transform(result.size, Image.Transform.AFFINE, matrix, Image.Resampling.BICUBIC)
+    if values['horizontal_flip']:
+        result = ImageOps.mirror(result)
+    return result if result.mode == original_mode else result.convert(original_mode)
+
+
+def _validate_image_value(name, value):
+    low, high, _ = IMAGE_DIMENSIONS[name]
+    if type(value) not in (int, float) or not low <= value <= high or not math.isfinite(value):
+        raise ValueError(f'{name}: values must be numbers between {low} and {high}.')
+    if name in INTEGER_IMAGE_DIMENSIONS and value != int(value):
+        raise ValueError(f'{name}: use whole-number values between {low} and {high}.')
+
+
+def _map_image_color(image, operation):
+    if image.mode not in ('RGBA', 'LA'):
+        return operation(image)
+    result = operation(image.convert('RGB' if image.mode == 'RGBA' else 'L'))
+    result.putalpha(image.getchannel('A'))
+    return result
 
 
 def apply_prompt(text, action):
     """Apply presentation settings without rewriting the original scene text."""
+    if not isinstance(action, dict):
+        raise ValueError('Choose an available generation action.')
     if any(key in action for key in GENERATION_DIMENSIONS):
+        if set(action) - set(GENERATION_DIMENSIONS) - {'id'}:
+            raise ValueError('Choose only available generation presentation groups.')
         instructions = []
         for key, values in GENERATION_DIMENSIONS.items():
             value = action.get(key)
@@ -152,11 +244,17 @@ def apply_prompt(text, action):
                 continue
             if value not in values:
                 raise ValueError(f'Choose an available generation {key}.')
-            instructions.append(f'Detail level: {value}.' if key == 'detail' else f'{value[0].upper()}{value[1:]} {key}.')
+            if key in ('style', 'lighting'):
+                instructions.append(f'{value[0].upper()}{value[1:]} {key}.')
+            else:
+                label = 'Detail level' if key == 'detail' else key.replace('_', ' ').capitalize()
+                instructions.append(f'{label}: {value}.')
         if not instructions:
             raise ValueError('Enable at least one presentation instruction.')
         return ' '.join(instructions) + ' Scene: ' + text
     # Only explicit legacy jobs substitute template slots; other braces stay literal.
+    if set(action) - set(LEGACY_GENERATION_SPACE) - {'id'}:
+        raise ValueError('Choose only available generation template fields.')
     for key in LEGACY_GENERATION_SPACE:
         if key not in action:
             raise ValueError('Choose a generation style or a complete legacy template action.')
@@ -166,7 +264,42 @@ def apply_prompt(text, action):
 
 def apply_text(text, action, rng):
     """Bounded variants of the original named actions; never spin on short text."""
-    name = action['name']
+    name = action.get('name') if isinstance(action, dict) else None
+    if name not in TEXT_ACTIONS:
+        raise ValueError(f'Unknown text action: {name}.')
+    if name == 'to_uppercase':
+        return text.upper()
+    if name == 'to_titlecase':
+        return text.title()
+    if name == 'normalize_whitespace':
+        return ' '.join(text.split())
+    if name in ('expand_contractions', 'contract_phrases'):
+        return _replace_contractions(text, expand=name == 'expand_contractions')
+    if name == 'unicode_quotes':
+        return re.sub(r'"([^"]*)"', lambda match: '“'+match[1]+'”', text).replace("'", '’')
+    if name == 'ascii_quotes':
+        return text.translate(str.maketrans({'“': '"', '”': '"', '‘': "'", '’': "'"}))
+    if name == 'replace_spaces_with_nbsp':
+        return text.replace(' ', '\u00a0')
+    if name in ('add_line_breaks', 'add_sentence_numbers', 'bullet_sentences',
+                'reverse_sentences', 'duplicate_sentence', 'truncate_last_sentence'):
+        if not text.strip():
+            return text
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        if name == 'add_line_breaks':
+            return '\n'.join(sentences)
+        if name == 'add_sentence_numbers':
+            return '\n'.join(f'{index}. {sentence}' for index, sentence in enumerate(sentences, 1))
+        if name == 'bullet_sentences':
+            return '\n'.join('- '+sentence for sentence in sentences)
+        if name == 'reverse_sentences':
+            return ' '.join(reversed(sentences))
+        if name == 'duplicate_sentence':
+            index = rng.randrange(len(sentences))
+            sentences.insert(index, sentences[index])
+        elif len(sentences) > 1:
+            sentences.pop()
+        return ' '.join(sentences)
     words = text.split()
     if name == 'remove_punctuation':
         return text.translate(str.maketrans('', '', string.punctuation))
@@ -222,6 +355,21 @@ def apply_text(text, action, rng):
             word = word[:j] + word[j+1] + word[j] + word[j+2:]
         words[i] = word
     return ' '.join(words)
+
+
+def _replace_contractions(text, *, expand):
+    pairs = {"can't": 'cannot', "won't": 'will not', "don't": 'do not', "doesn't": 'does not',
+             "didn't": 'did not', "isn't": 'is not', "aren't": 'are not', "wasn't": 'was not',
+             "weren't": 'were not', "hasn't": 'has not', "haven't": 'have not', "hadn't": 'had not',
+             "couldn't": 'could not', "shouldn't": 'should not', "wouldn't": 'would not', "mustn't": 'must not'}
+    replacements = pairs if expand else {value: key for key, value in pairs.items()}
+    def replace(match):
+        source = match[0]
+        value = replacements[source.lower()]
+        if source.isupper():
+            return value.upper()
+        return value[0].upper()+value[1:] if source[0].isupper() else value
+    return re.sub(r'\b(?:'+'|'.join(re.escape(key) for key in replacements)+r')\b', replace, text, flags=re.I)
 
 
 def rouge_l(prediction, reference):

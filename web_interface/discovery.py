@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 
 from classification_labels import resolve_target
+from training_settings import LEARNING_RATES
+from failure_analysis import assess_measurement, input_analysis, summarize_analysis
 
 from rl_policy import TerminalDQN
 
@@ -23,7 +25,8 @@ TERMINAL = frozenset(('completed', 'cancelled', 'error'))
 IDENTITY = re.compile(r'[0-9a-f]{32}')
 TRAINING_PROGRESS_FIELDS = ('completed', 'total', 'loss', 'phase', 'device', 'device_name',
                             'effective_batch_size', 'micro_batch_size', 'oom_retries', 'epoch', 'epochs',
-                            'processed_examples', 'examples_per_epoch', 'total_examples')
+                            'processed_examples', 'examples_per_epoch', 'total_examples',
+                            'validation_completed', 'validation_total')
 
 
 def _integer(value, name, minimum, maximum):
@@ -47,7 +50,10 @@ def _identity(value):
 def _public(value, job_id=None):
     """Copy JSON data, removing large classifier vectors from every public view."""
     if isinstance(value, dict):
-        result = {key: _public(item, job_id) for key, item in value.items() if key != 'probabilities'}
+        judge_distribution = (value.get('readout') == 'vev_expected_ordinal' or
+                              value.get('method') in ('vev_binary_question', 'vev_target_verification'))
+        result = {key: _public(item, job_id) for key, item in value.items()
+                  if key != 'probabilities' or judge_distribution}
         if job_id and isinstance(result.get('image'), str):
             filename = result['image']
             if re.fullmatch(r'[A-Za-z0-9_-]+\.png', filename):
@@ -91,6 +97,10 @@ class DiscoveryManager:
                 interrupted = report['status'] not in TERMINAL
                 if interrupted:
                     report.update(status='error', phase='interrupted', error='Server stopped before this job finished.')
+                    validation = report.get('validation')
+                    if (report.get('kind') == 'finetune' and isinstance(validation, dict) and
+                            validation.get('status') in ('pending', 'running')):
+                        validation.update(status='error', error=report['error'])
                 table = self.finetunes if report.get('kind') == 'finetune' else self.jobs
                 table[report['id']] = report
                 if interrupted:
@@ -248,7 +258,9 @@ class DiscoveryManager:
                    mean_reward=0., model_calls=0, comparison_model_calls=0, unique_evaluations=0, criterion='',
                    config=settings, model=copy.deepcopy(context['model']), current=None,
                    records=[], history=[], baseline=[], artifacts={}, policy_statistics=None,
-                   predicted_landscape=None)
+                   predicted_landscape=None,
+                   analysis_summary=summarize_analysis([], [], total_inputs=len(context['states']),
+                                                       total_actions=len(context['preview']['actions'])))
         return self._launch(job, context, self._discover)
 
     def _launch(self, job, context, worker):
@@ -316,7 +328,7 @@ class DiscoveryManager:
 
     def get_finetune(self, job_id):
         with self.lock:
-            return _public(self.finetunes[_identity(job_id)])
+            return _public(self.finetunes[_identity(job_id)], job_id)
 
     def _adaptation_context(self, job_id):
         discovery = self.get(job_id)
@@ -443,7 +455,12 @@ class DiscoveryManager:
                 options['checks'] = context['generation_row'](index)['checks'] if context.get('generation_row') else []
             if job['config'].get('generation_metric') == 'combined':
                 options['action'] = copy.deepcopy(action)
-        return _json(evaluator.predict(value, seed=seed, artifact_name=artifact_name, **options))
+        result = _json(evaluator.predict(value, seed=seed, artifact_name=artifact_name, **options))
+        task = context['preview']['config']['task']
+        original = self._input(context, index) if task == 'summarization' else None
+        result['input_analysis'] = input_analysis(task, original, value, action)
+        result.setdefault('seed', seed)
+        return result
 
     def _comparison_call(self, job_id):
         self._check(job_id)
@@ -451,12 +468,14 @@ class DiscoveryManager:
             self.jobs[job_id]['model_calls'] += 1
             self.jobs[job_id]['comparison_model_calls'] += 1
 
-    def _score(self, evaluator, output, baseline, target):
+    def _score(self, evaluator, output, baseline, target, *, task=None):
         score = _json(evaluator.score(output, baseline, target=target))
         score['reward'] = _number(score.get('reward'), 'Evaluator reward', -1, 1)
         score['severity'] = _number(score.get('severity'), 'Evaluator severity', 0, 1)
         if type(score.get('failure')) is not bool or not isinstance(score.get('criterion'), str) or not isinstance(score.get('metrics'), dict):
             raise ValueError('Evaluator returned an invalid measured score.')
+        task = task or getattr(evaluator, 'config', {}).get('task')
+        score['analysis'] = assess_measurement(task, score, output, baseline, labelled=target is not None)
         return score
 
     def _policy_statistics(self, job_id, policy, context, records, *, persist=False):
@@ -555,7 +574,9 @@ class DiscoveryManager:
                             raise ValueError('The classification evaluator cannot validate explicit model labels.')
                         for target in config['label_map'].values():
                             resolve(target)
-                    self._update(job_id, scoring=_json(evaluator.describe()))
+                    self._update(job_id, scoring={**_json(evaluator.describe()), 'analysis_version': 1,
+                        'evidence_policy': 'Labels and empty outputs support observed errors. Automatic judges and reference overlap flag review candidates. Input validity and scorer instability can make a result inconclusive.',
+                        'sampling_policy': 'Search-selected pairs; counts describe evaluated pairs only, not dataset failure prevalence. Cached visits are not independent measurements.'})
                 states = context['states']
                 actions = context['preview']['actions']
                 policy = TerminalDQN(states.shape[1], len(actions), seed=config['seed'])
@@ -583,8 +604,9 @@ class DiscoveryManager:
                             if index not in baseline_cache:
                                 output = self._predict(job_id, evaluator, self._input(context, index), index, f'input-{index}-baseline')
                                 baseline_cache[index] = output
-                                score = self._score(evaluator, output, output, target)
-                                baseline = dict(input_index=index, output=output, **score)
+                                score = self._score(evaluator, output, output, target, task=config['task'])
+                                baseline = dict(input_index=index, output=output, measurements=1,
+                                                seed=(config['seed']+index) % 2**32, **score)
                                 if context.get('summary_dataset'):
                                     baseline['reference_summary'] = context['summary_row'](index)['summary']
                                 with self.lock:
@@ -595,7 +617,7 @@ class DiscoveryManager:
                                 self._update(job_id, phase='evaluating action')
                                 output = self._predict(job_id, evaluator, self._input(context, index, action_id), index,
                                                        f'input-{index}-action-{action_id}', action=actions[action_index])
-                                score = self._score(evaluator, output, baseline_cache[index], target)
+                                score = self._score(evaluator, output, baseline_cache[index], target, task=config['task'])
                                 pair_cache[pair] = (output, score)
                             if pair not in nodes and not self._events[job_id].is_set():
                                 try:
@@ -615,7 +637,9 @@ class DiscoveryManager:
                         record = dict(input_index=index, action_id=action_id, visits=visits,
                                       severity=score['severity'], failure_rate=float(score['failure']),
                                       reward=score['reward'], failure=score['failure'], output=output,
-                                      metrics=score['metrics'], criterion=score['criterion'])
+                                      metrics=score['metrics'], criterion=score['criterion'],
+                                      analysis=score['analysis'], measurements=1,
+                                      seed=(config['seed']+index) % 2**32)
                         if pair in nodes:
                             record['node'] = nodes[pair]
                         aggregates[pair] = record
@@ -638,6 +662,9 @@ class DiscoveryManager:
                             job.update(episode=episode, reward=score['reward'], mean_reward=total_reward/episode,
                                        loss=loss, records=list(aggregates.values()), unique_evaluations=len(pair_cache),
                                        criterion=score['criterion'], current=record, phase='learning from terminal reward')
+                            if not cached:
+                                job['analysis_summary'] = summarize_analysis(job['records'], job['baseline'],
+                                    total_inputs=len(states), total_actions=len(actions))
                             if time.monotonic() >= next_report:
                                 started = time.monotonic()
                                 self._persist(job_id)
@@ -663,6 +690,13 @@ class DiscoveryManager:
             job = self.jobs.get(job_id) or self.finetunes[job_id]
             directory = self.directory/job_id
             if job_id in self.jobs:
+                summary = job.get('analysis_summary')
+                if summary is not None:
+                    # A cancellation or error can occur after the original was
+                    # measured but before the first action result was recorded.
+                    job['analysis_summary'] = summarize_analysis(job['records'], job['baseline'],
+                        total_inputs=summary['total_inputs'],
+                        total_actions=summary['total_pairs']//max(1, summary['total_inputs']))
                 job['artifacts'] = {'report': f'/discoveries/{job_id}/artifacts/report.json',
                                     'episodes': f'/discoveries/{job_id}/artifacts/episodes.jsonl',
                                     'policy': f'/discoveries/{job_id}/artifacts/policy.pt' if (directory/'policy.pt').exists() else None}
@@ -671,7 +705,7 @@ class DiscoveryManager:
                     job['artifacts']['predictions'] = f'/discoveries/{job_id}/artifacts/{filename}'
             else:
                 job['artifacts'] = {'report': f'/discoveries/{job_id}/artifacts/report.json'}
-            report = _public(job, job_id if job_id in self.jobs else None)
+            report = _public(job, job_id)
             temporary = directory/'report.json.tmp'
             temporary.write_text(json.dumps(report, indent=2, allow_nan=False))
             temporary.replace(directory/'report.json')
@@ -735,8 +769,9 @@ class DiscoveryManager:
         with self.lock:
             if job_id not in self.jobs:
                 self.finetunes[job_id]
-                if filename != 'report.json':
-                    raise ValueError('Only the training report is available for download.')
+                if (not isinstance(filename, str) or
+                        not re.fullmatch(r'report\.json|validation-(?:before|after)-\d+-\d+-(?:original|action_\d+)\.png', filename)):
+                    raise ValueError('Only the training report and validation images are available for download.')
         if not isinstance(filename, str) or not re.fullmatch(r'(?:report\.json|episodes\.jsonl|policy\.pt|predictions-\d+\.npy|[A-Za-z0-9_-]+\.png)', filename):
             raise ValueError('Unknown discovery artifact.')
         folder = self.directory/job_id
@@ -752,7 +787,8 @@ class DiscoveryManager:
         from adaptation import _records, _image_path
         allowed = {'discovery_id', 'examples', 'epochs', 'learning_rate', 'batch_size', 'seed',
                    'action_ids', 'include_originals', 'training_data', 'device',
-                   'weight_decay', 'max_grad_norm', 'cleanup_after_finetune'}
+                   'weight_decay', 'max_grad_norm', 'cleanup_after_finetune',
+                   'generation_size', 'generation_framing', 'validation_data', 'validation_repeats'}
         if not isinstance(config, dict) or set(config)-allowed:
             raise ValueError('Unknown fine-tuning settings.')
         if 'action_ids' in config:
@@ -792,9 +828,22 @@ class DiscoveryManager:
         job = dict(id=job_id, kind='finetune', discovery_id=discovery_id, task=discovery['task'],
                    status='queued', phase='queued', loss=None, checkpoint=None, examples=reviewed, settings=settings,
                    **self._training_counts(len(reviewed), settings))
+        self._prepare_validation(job, context, discovery, config)
         return self._launch(job, context, self._finetune)
 
     def _finetune_settings(self, config, discovery):
+        generation_options = {'generation_size', 'generation_framing', 'validation_data', 'validation_repeats'}
+        if discovery['task'] != 'generation' and generation_options & config.keys():
+            raise ValueError('Generation target and validation settings apply only to image generation.')
+        if discovery['task'] == 'generation':
+            generation_size = config.get('generation_size', 'auto')
+            if generation_size != 'auto':
+                generation_size = _integer(generation_size, 'Generation training resolution', 32, 1024)
+                if generation_size % 8:
+                    raise ValueError('Generation training resolution must be a multiple of 8.')
+            framing = config.get('generation_framing', 'preserve')
+            if not isinstance(framing, str) or framing not in ('preserve', 'center_crop'):
+                raise ValueError('Choose preserve or center_crop for generation target framing.')
         device = config.get('device', 'auto')
         if not isinstance(device, str) or device not in ('auto', 'cpu', 'cuda'):
             raise ValueError('Choose a fine-tuning device: auto, cpu, or cuda.')
@@ -804,14 +853,17 @@ class DiscoveryManager:
         cleanup = config.get('cleanup_after_finetune', True)
         if type(cleanup) is not bool:
             raise ValueError('Cleanup after fine-tuning must be true or false.')
-        return dict(device=device, epochs=_integer(config.get('epochs', 1), 'Epochs', 1, 100),
-                    learning_rate=_number(config.get('learning_rate', .00005), 'Learning rate', 1e-8, .1),
+        settings = dict(device=device, epochs=_integer(config.get('epochs', 1), 'Epochs', 1, 100),
+                    learning_rate=_number(config.get('learning_rate', LEARNING_RATES[discovery['task']]), 'Learning rate', 1e-8, .1),
                     batch_size=batch_size,
                     weight_decay=_number(config.get('weight_decay', .01), 'Weight decay', 0, 1),
                     max_grad_norm=_number(config.get('max_grad_norm', 1.), 'Maximum gradient norm', 0, 100),
                     cleanup_after_finetune=cleanup,
                     seed=_integer(config.get('seed', discovery['config']['seed']), 'Seed', 0, 2**32-1),
                     generation_size=discovery['config']['generation_size'])
+        if discovery['task'] == 'generation':
+            settings.update(generation_size=generation_size, generation_framing=framing)
+        return settings
 
     @staticmethod
     def _training_counts(example_count, settings):
@@ -831,7 +883,69 @@ class DiscoveryManager:
         job = dict(id=uuid.uuid4().hex, kind='finetune', discovery_id=discovery['id'], task=discovery['task'],
                    status='queued', phase='queued', loss=None, checkpoint=None, settings=settings, **specification,
                    **self._training_counts(specification['adaptation_selection']['example_count'], settings))
+        self._prepare_validation(job, context, discovery, config)
         return self._launch(job, context, self._finetune)
+
+    def _prepare_validation(self, job, context, discovery, config):
+        """Freeze an explicitly disjoint comparison plan before starting any work."""
+        if job['task'] != 'generation':
+            return
+        job['validation'] = dict(status='not_requested')
+        if 'validation_data' not in config:
+            if 'validation_repeats' in config:
+                raise ValueError('Validation repeats require held-out validation prompts.')
+            return
+        from adaptation import TrainingExamples
+        from core import apply_prompt
+        from generation_validation import validate_validation_data, MAX_PANEL_IMAGES
+        repeats = _integer(config.get('validation_repeats', 1), 'Validation repeats', 1, 4)
+        training = TrainingExamples(job, context, self._training_input)
+        def prompts():
+            for record in job.get('training_data', job.get('examples', [])):
+                yield self._training_input(context, record.get('input_index', 0))
+            for example in training:
+                yield example['input']
+        identities = (job['adaptation_selection']['action_ids'] if 'adaptation_selection' in job else
+                      sorted({row['action_id'] for row in job['examples']}))
+        catalog = {action['id']: action for action in context['preview']['actions']}
+        actions = [copy.deepcopy(catalog[identity]) for identity in identities]
+        records = validate_validation_data(config['validation_data'], prompts(), actions=actions)
+        for action in actions:
+            apply_prompt(records[0]['prompt'], action)
+        if len(records) * (1 + len(actions)) * repeats > MAX_PANEL_IMAGES:
+            raise ValueError('Validation is limited to 4096 images per panel; reduce actions or repeats.')
+        settings = copy.deepcopy(discovery['config'])
+        settings.update(device=job['settings']['device'], validation_repeats=repeats)
+        if settings.get('generation_metric') == 'checks' and any(not row['checks'] for row in records):
+            raise ValueError('Requirement-check validation needs explicit checks for every held-out prompt.')
+        job['validation_plan'] = dict(records=records, actions=actions, config=settings)
+        job['validation'] = dict(status='pending', prompt_count=len(records))
+
+    def _validate_generation(self, job_id, model, phase):
+        from generation_validation import evaluate_generation, compare_generation
+        job = self.finetunes[job_id]
+        plan = job['validation_plan']
+        before = job['validation'].get('before')
+        config = {**plan['config'], 'validation_phase': phase}
+        if before:
+            scorer = before['scorer']
+            if scorer.get('name') and scorer.get('revision'):
+                key = '_clip_model' if config.get('generation_metric') == 'clip' else '_judge_model'
+                config[key] = dict(source=scorer.get('source', 'huggingface'),
+                                   name=scorer['name'], revision=scorer['revision'])
+        self._update(job_id, phase=f'validating {phase} outputs', validation_completed=0,
+                     validation={**job['validation'], 'status': 'running', 'phase': phase})
+        panel = evaluate_generation(model, config, plan['records'], plan['actions'], self.directory/job_id,
+            lambda **fields: self._progress(job_id, **fields), lambda: self._events[job_id].is_set(),
+            evaluator_factory=self.evaluator_factory, expected_scorer=before['scorer'] if before else None)
+        validation = {**job['validation'], phase: panel}
+        if phase == 'after':
+            validation.update(status='completed', comparison=compare_generation(before, panel))
+        else:
+            validation.update(status='pending', phase='after training')
+        self._update(job_id, validation=validation)
+        self._persist(job_id)
+        return panel
 
     def _finetune(self, job_id):
         status, error = 'completed', None
@@ -850,11 +964,16 @@ class DiscoveryManager:
                 if train is None:
                     from fine_tuning import fine_tune
                     train = fine_tune
+                model = copy.deepcopy(context['model'])
+                if 'validation_plan' in job:
+                    before = self._validate_generation(job_id, model, 'before')
+                    if model['source'] == 'huggingface' and before['scoring'].get('revision'):
+                        model['revision'] = before['scoring']['revision']
+                    self._check(job_id)
                 self._update(job_id, phase='training selected actions' if adapting else 'training reviewed examples')
-                result = _json(train(context['model'], job['task'], examples, directory, job['settings'],
+                result = _json(train(model, job['task'], examples, directory, job['settings'],
                                      lambda **fields: self._progress(job_id, **fields),
                                      lambda: self._events[job_id].is_set()))
-                self._check(job_id)
                 checkpoint = Path(result['checkpoint']).resolve()
                 if not checkpoint.is_dir() or directory.resolve() not in checkpoint.parents:
                     raise ValueError('Training did not return a separate saved checkpoint inside its job directory.')
@@ -868,9 +987,18 @@ class DiscoveryManager:
                               completed=result.get('steps', job['completed']),
                               total=result.get('total', job['total'] if job['total'] is not None else result.get('steps')))
                 self._update(job_id, **fields)
+                # Preserve a successfully saved candidate even if cancellation
+                # arrives just after the trainer returns or validation fails.
+                self._persist(job_id)
+                self._check(job_id)
+                if 'validation_plan' in job:
+                    self._validate_generation(job_id, dict(source='local', name=str(checkpoint), task='generation'), 'after')
         except InterruptedError:
             status = 'cancelled'
         except Exception as exc:
             status, error = 'error', str(exc)
         finally:
+            if 'validation_plan' in job and status in ('cancelled', 'error'):
+                self._update(job_id, validation={**job['validation'], 'status': status,
+                             **({'error': error} if error else {})})
             self._finish(job_id, status, error)

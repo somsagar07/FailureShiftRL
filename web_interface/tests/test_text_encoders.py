@@ -236,10 +236,10 @@ class TextEncoderTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, rf'\b{limit}\b'):
                     encoder.encode([' '.join(['cat']*count)])
 
-    def test_summary_rejects_non_seq2seq_architecture(self):
+    def test_summary_rejects_causal_checkpoint_without_pretrained_weights(self):
         directory = Path(self.scratch.name)/'causal'
         GPT2Config(n_embd=12, n_layer=1, n_head=3).save_pretrained(directory)
-        with self.assertRaisesRegex(ValueError, 'encoder.decoder|sequence.to.sequence|seq2seq'):
+        with self.assertRaisesRegex(ValueError, 'Could not load|model.safetensors|pytorch_model'):
             text_encoders.SummarizationEncoder(self.selection(directory))
 
     def test_diffusion_uses_final_clip_layer_norm_and_non_padding_mean(self):

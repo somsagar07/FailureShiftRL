@@ -391,6 +391,50 @@ class DiscoveryTests(unittest.TestCase):
         with self.assertRaises((ValueError, FileNotFoundError)):
             manager.artifact(result['id'], '../report.json')
 
+    def test_evidence_counts_distinct_measurements_not_cached_policy_visits(self):
+        manager = self.manager()
+        result = self.run_job(manager)
+        self.assertEqual(result['status'], 'completed', result.get('error'))
+        self.assertIn('analysis_summary', result)
+        summary = result['analysis_summary']
+        self.assertEqual(summary['unique_pairs'], 2)
+        self.assertEqual(summary['total_pairs'], 2)
+        # These legacy fixtures have IDs only, so target validity is unknown.
+        self.assertEqual(summary['counts'], {'failure': 0, 'candidate': 0,
+                                          'no_failure_observed': 0, 'inconclusive': 2})
+        self.assertEqual(summary['baseline_inputs'], 1)
+        self.assertEqual(sum(row['measurements'] for row in result['records']), 2)
+        self.assertEqual(sum(row['visits'] for row in result['records']), 40)
+        self.assertTrue(all(row['seed'] == 7 for row in result['records']))
+        persisted = json.loads(manager.artifact(result['id'], 'report.json').read_text())
+        self.assertEqual(persisted['analysis_summary'], summary)
+        self.assertEqual(DiscoveryManager(None, self.embeddings, self.directory).get(result['id'])['analysis_summary'], summary)
+
+    def test_meaning_changing_edits_do_not_claim_reference_based_model_failure(self):
+        context = self.embeddings.context
+        context['preview']['original']['text'] = 'Bob will bring 5-8 friends.'
+        context['preview']['config']['text'] = 'Bob will bring 5-8 friends.'
+        context['preview']['actions'] = [{'id': 1, 'name': 'remove_punctuation'}]
+        context['preview']['nodes'] = [{'id': 1, 'text': 'Bob will bring 58 friends'}]
+        manager = self.manager()
+        result = self.run_job(manager)
+        self.assertEqual(result['status'], 'completed', result.get('error'))
+        record = result['records'][0]
+        self.assertIn('analysis', record)
+        self.assertEqual(record['analysis']['status'], 'inconclusive')
+        self.assertIn('numbers_changed', [item['code'] for item in record['analysis']['warnings']])
+        self.assertEqual(record['output']['input_analysis']['status'], 'review')
+
+    def test_baseline_evidence_remains_counted_when_action_inference_fails(self):
+        manager = self.manager(evaluator=Evaluator(fail_at=2))
+        result = self.run_job(manager)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(len(result['baseline']), 1)
+        self.assertEqual(result['analysis_summary']['baseline_inputs'], 1)
+        self.assertEqual(result['analysis_summary']['unique_pairs'], 0)
+        report = json.loads(manager.artifact(result['id'], 'report.json').read_text())
+        self.assertEqual(report['analysis_summary']['baseline_inputs'], 1)
+
     def test_cancel_during_baseline_serializes_jobs_and_allows_retry(self):
         gate = threading.Event()
         evaluator = Evaluator(gate)

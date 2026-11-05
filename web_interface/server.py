@@ -18,13 +18,14 @@ from pathlib import Path
 from urllib.parse import urlsplit, unquote, parse_qs
 
 from core import (default_action_space, normalize_action_space, actions_for, apply_image, apply_text,
-                  apply_prompt, LEGACY_GENERATION_SPACE)
+                  apply_prompt, LEGACY_GENERATION_SPACE, available_action_space, action_metadata, MAX_ACTIONS)
 from models import ModelManager
 from data_sources import DatasetManager, MAX_UPLOAD_BYTES, hf_dataset_options, benchmark_dataset_options
 from embeddings import EmbeddingManager, HuggingFaceEncoder, create_encoder
 from discovery import DiscoveryManager
-from model_loading import prepare_analysis_model
+from model_loading import prepare_analysis_model, _safe_relative_path
 from working_storage import BoundedCache, budget_bytes
+from robotics import RoboticsManager, CHUNK_BYTES as POLICY_CHUNK_BYTES
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TEXT = ('A university research team tested a new water filter in three villages. '
@@ -56,7 +57,7 @@ def validate_config(data):
     elif not isinstance(text, str) or len(text) > 20000 or (task != 'classification' and not text.strip()):
         raise ValueError('Enter input text of at most 20,000 characters.')
     space = normalize_action_space(task, data.get('action_space'))
-    defaults = LEGACY_GENERATION_SPACE if legacy_generation else default_action_space(task)
+    defaults = LEGACY_GENERATION_SPACE if legacy_generation else available_action_space(task)
     if task == 'generation' and set(space) == {'styles'}:
         defaults = {'styles': defaults['style']}
     if any(value not in defaults[key] for key, values in space.items() for value in values):
@@ -66,8 +67,18 @@ def validate_config(data):
     model = data.get('model', {'source': 'local', 'name': ''})
     if not isinstance(model, dict) or model.get('source') not in ('local', 'huggingface') or not isinstance(model.get('name'), str) or len(model['name']) > 1024:
         raise ValueError('Invalid model selection.')
+    selected = {'source': model['source'], 'name': model['name']}
+    if 'candidate_labels' in model:
+        from embeddings import _selection as select_image_model
+        selected = select_image_model({**selected,'candidate_labels':model['candidate_labels']},task)
+        selected.pop('task',None)
+    revision = model.get('revision')
+    if revision is not None:
+        if not _safe_relative_path(revision) or not revision.strip() or len(revision) > 256:
+            raise ValueError('The model revision must be a branch, tag, or commit name.')
+        selected['revision'] = revision
     return dict(task=task, dataset_id=dataset_id, text=text, action_space=space,
-                model={'source': model['source'], 'name': model['name']})
+                model=selected)
 
 
 class PreviewManager:
@@ -271,7 +282,7 @@ class PreviewManager:
 
 
 def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune_fn=None,
-                  model_preparer=prepare_analysis_model):
+                  model_preparer=prepare_analysis_model, robotics_runner=None):
     previews = PreviewManager(directory or ROOT/'runs'/'previews')
     models = ModelManager()
     image_encoder, other_encoder = HuggingFaceEncoder, create_encoder
@@ -281,7 +292,7 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                                   encoder_factory=encoder_factory, model_preparer=model_preparer)
     discoveries = DiscoveryManager(previews, embeddings, previews.directory.parent/'discoveries',
                                    evaluator_factory=evaluator_factory, finetune_fn=finetune_fn)
-
+    robotics = RoboticsManager(previews.directory.parent/'robotics', runner=robotics_runner)
     class Handler(BaseHTTPRequestHandler):
         def send(self, status, body, kind='application/json'):
             if isinstance(body, (dict, list)):
@@ -317,8 +328,28 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
             path = unquote(urlsplit(self.path).path)
             query = parse_qs(urlsplit(self.path).query)
             try:
+                if path == '/api/robotics/catalog':
+                    return self.send(200, robotics.catalog())
+                if path == '/api/robotics/starter-policies':
+                    return self.send(200, robotics.starter_policies())
+                match = re.fullmatch(r'/api/robotics/runs/([0-9a-f]{32})/predictions', path)
+                if match:
+                    indexes=query.get('input_index',[])
+                    if len(indexes)!=1 or not re.fullmatch(r'\d+',indexes[0]):
+                        raise ValueError('Provide one nonnegative episode index.')
+                    return self.send(200, robotics.predictions(match[1],int(indexes[0])))
+                match = re.fullmatch(r'/api/robotics/runs/([0-9a-f]{32})', path)
+                if match:
+                    return self.send(200, robotics.get(match[1]))
+                match = re.fullmatch(r'/robotics/([0-9a-f]{32})/artifacts/([A-Za-z0-9_.-]+)', path)
+                if match:
+                    file = robotics.artifact(match[1], match[2])
+                    return self.send(200, file.read_bytes(), mimetypes.guess_type(file.name)[0] or 'application/octet-stream')
                 if path == '/api/catalog':
                     return self.send(200, dict(tasks={task: default_action_space(task) for task in TASKS},
+                                               action_catalog={task: available_action_space(task) for task in TASKS},
+                                               action_metadata={task: action_metadata(task) for task in TASKS},
+                                               limits=dict(max_actions=MAX_ACTIONS),
                                                text=DEFAULT_TEXT, prompt=DEFAULT_PROMPT))
                 if path == '/api/discoveries':
                     return self.send(200, discoveries.list())
@@ -373,6 +404,7 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 static = {'/': 'index.html', '/app.js': 'app.js', '/graph.js': 'graph.js',
                           '/embedding-view.js':'embedding-view.js', '/embedding-controller.js':'embedding-controller.js',
                           '/adaptation-controller.js':'adaptation-controller.js',
+                          '/robotics-controller.js':'robotics-controller.js', '/robotics.css':'robotics.css',
                           '/discovery-controller.js':'discovery-controller.js', '/style.css': 'style.css'}
                 if path in static:
                     file = ROOT/'static'/static[path]
@@ -390,6 +422,16 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 <= length <= MAX_UPLOAD_BYTES:
                     return self.send(413, {'error': 'Request exceeds 20 MB.'})
+                path = urlsplit(self.path).path
+                policy_chunk = re.fullmatch(r'/api/robotics/policies/([0-9a-f]{32})/files/(\d+)', path)
+                if policy_chunk:
+                    query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                    if set(query) != {'offset'} or len(query['offset']) != 1:
+                        raise ValueError('Provide one byte offset for this policy chunk.')
+                    if length > POLICY_CHUNK_BYTES:
+                        return self.send(413, {'error': 'Policy chunks must be at most 8 MiB.'})
+                    return self.send(200, robotics.upload_chunk(policy_chunk[1], int(policy_chunk[2]),
+                        int(query['offset'][0]), self.rfile.read(length)))
                 upload = re.fullmatch(r'/api/datasets/([0-9a-f]{32})/files/(\d+)', self.path)
                 if upload:
                     previews.datasets.upload(upload[1], int(upload[2]), self.rfile.read(length))
@@ -397,6 +439,17 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                     return self.send(415, {'error': 'Send application/json.'})
                 data = json.loads(self.rfile.read(length))
+                if path == '/api/robotics/policies':
+                    return self.send(201, robotics.create_upload(data))
+                if path == '/api/robotics/runs':
+                    job = robotics.start(data)
+                    return self.send(202, job)
+                policy_finish = re.fullmatch(r'/api/robotics/policies/([0-9a-f]{32})/finish', path)
+                if policy_finish:
+                    return self.send(200, robotics.finish_upload(policy_finish[1]))
+                robotics_cancel = re.fullmatch(r'/api/robotics/runs/([0-9a-f]{32})/cancel', path)
+                if robotics_cancel:
+                    return self.send(200, robotics.cancel(robotics_cancel[1]))
                 if self.path in ('/api/discoveries', '/api/finetunes'):
                     if not isinstance(data, dict):
                         raise ValueError('Request must be a JSON object.')
@@ -414,7 +467,8 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                     device = data.get('device', 'auto')
                     if not isinstance(device, str) or device not in ('auto', 'cpu', 'cuda'):
                         raise ValueError('Choose Automatic, CPU, or CUDA for Analyze.')
-                    return self.send(202, embeddings.start(data['preview_id'], device=device))
+                    job = embeddings.start(data['preview_id'], device=device)
+                    return self.send(202, job)
                 expansion = re.fullmatch(r'/api/embeddings/([0-9a-f]{32})/expand', self.path)
                 if expansion:
                     if not isinstance(data, dict) or type(data.get('input_index')) is not int:
@@ -434,8 +488,10 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 self.send(400, {'error': str(exc)})
             except RuntimeError as exc:
                 self.send(409, {'error': str(exc)})
-            except KeyError:
+            except (KeyError, FileNotFoundError):
                 self.send(404, {'error': 'Job or dataset not found. Analyze the input again if the server restarted.'})
+            except OSError as exc:
+                self.send(500, {'error': f'Could not save or read local run data: {exc}'})
 
         def log_message(self, fmt, *args):
             if len(args) > 1 and str(args[1]) not in ('200', '202'):
@@ -445,6 +501,7 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
     server.previews = previews
     server.embeddings = embeddings
     server.discoveries = discoveries
+    server.robotics = robotics
     return server
 
 
@@ -467,4 +524,5 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
     finally:
+        server.robotics.close()
         server.server_close()

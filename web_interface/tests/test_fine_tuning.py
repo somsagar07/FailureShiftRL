@@ -42,6 +42,14 @@ class FineTuningTests(unittest.TestCase):
         return ft.fine_tune(self.model(task),task,examples,Path(self.scratch.name)/'training',
             {'epochs':2,'batch_size':1,'learning_rate':.01,'seed':8,**settings},lambda **kw:None,lambda:False)
 
+    def test_direct_training_uses_task_learning_rate_when_omitted(self):
+        for task,target,expected in [('classification',1,.001),('summarization','cat',.00002)]:
+            with self.subTest(task=task):
+                source=Image.new('RGB',(16,16)) if task=='classification' else 'a cat'
+                result=ft.fine_tune(self.model(task),task,[{'input':source,'target':target}],
+                    Path(self.scratch.name)/task,{'device':'cpu'},lambda **kw:None,lambda:False)
+                self.assertEqual(result['settings']['learning_rate'],expected)
+
     def test_automatic_device_falls_back_to_cpu_when_cuda_is_unavailable(self):
         with patch.object(torch.cuda,'is_available',return_value=False):
             result=self.train('classification',[{'input':Image.new('RGB',(16,16)),'target':1}],epochs=1)
@@ -440,6 +448,33 @@ class FineTuningTests(unittest.TestCase):
             for key in reference:
                 torch.testing.assert_close(saved[key],reference[key],rtol=2e-5,atol=1e-6)
 
+    def test_reported_and_displayed_loss_weight_short_final_batches_by_examples(self):
+        examples=[{'input':Image.new('RGB',(16,16),color),'target':1}
+                  for color in ('red','green','blue')]
+        batches,events=[],[]
+        original=ViTForImageClassification.forward
+        def forward(model,*args,**kwargs):
+            result=original(model,*args,**kwargs)
+            count=result.logits.shape[0]
+            labels=torch.ones(count,dtype=torch.long,device=result.logits.device)
+            batches.append((float(torch.nn.functional.cross_entropy(result.logits.detach(),labels)),count))
+            return result
+        with patch.object(ViTForImageClassification,'forward',forward):
+            result=ft.fine_tune(self.model(),'classification',examples,
+                Path(self.scratch.name)/'weighted-loss',
+                {'epochs':2,'batch_size':2,'learning_rate':.01,'seed':8,'device':'cpu'},
+                lambda **fields:events.append(fields),lambda:False)
+        self.assertEqual([count for _,count in batches],[2,1,2,1])
+        expected=sum(loss*count for loss,count in batches)/6
+        self.assertAlmostEqual(result['training_loss'],expected,places=6)
+        report=json.loads((Path(result['checkpoint'])/'training_report.json').read_text())
+        self.assertAlmostEqual(report['training_loss'],expected,places=6)
+        training=[event for event in events if event['phase']=='training reviewed examples']
+        for index,event in enumerate(training,1):
+            prefix=batches[:index]
+            expected=sum(loss*count for loss,count in prefix)/sum(count for _,count in prefix)
+            self.assertAlmostEqual(event['loss'],expected,places=6)
+
     @unittest.skipUnless(torch.cuda.is_available(),'CUDA OOM recovery requires CUDA')
     def test_oom_after_partial_backward_replays_whole_update_and_restores_rng(self):
         examples=[{'input':Image.new('RGB',(16,16),color),'target':index%3}
@@ -593,6 +628,33 @@ class FineTuningTests(unittest.TestCase):
         reloaded=AutoModelForSeq2SeqLM.from_pretrained(result['checkpoint'],local_files_only=True)
         self.assertEqual(reloaded.config.decoder.max_position_embeddings,8)
 
+    def test_summary_target_can_exceed_tokenizer_input_limit(self):
+        source=Path(self.scratch.name)/'short-input-summary'
+        T5ForConditionalGeneration.from_pretrained(self.summary,local_files_only=True).save_pretrained(source)
+        save_tokenizer(source,limit=4)
+        original=load_file(source/'model.safetensors')
+        try:
+            result=ft.fine_tune(self.model('summarization',source),'summarization',
+                [{'input':'cat','target':'a cat in the garden'}],Path(self.scratch.name)/'training',
+                {'device':'cpu'},lambda **kw:None,lambda:False)
+        except ValueError as exc:
+            self.fail(f'The tokenizer input limit must not reject a valid decoder target: {exc}')
+        self.assertEqual(result['steps'],1)
+        self.assertTrue(math.isfinite(result['training_loss']))
+        self.assertEqual(result['input_policy']['max_input_tokens'],4)
+        saved=load_file(Path(result['checkpoint'])/'model.safetensors')
+        self.assertTrue(any(not torch.equal(original[key],saved[key]) for key in saved))
+        reloaded=AutoModelForSeq2SeqLM.from_pretrained(result['checkpoint'],local_files_only=True)
+        self.assertEqual(reloaded.config.model_type,'t5')
+
+    def test_relative_position_summary_targets_keep_a_bounded_output_limit(self):
+        with patch.object(torch.optim,'AdamW',side_effect=AssertionError('optimizer created before target validation')):
+            with self.assertRaisesRegex(ValueError,'target summary.*token limit'):
+                ft.fine_tune(self.model('summarization'),'summarization',
+                    [{'input':'cat','target':' '.join(['cat']*2048)}],Path(self.scratch.name)/'training',
+                    {'device':'cpu'},lambda **kw:None,lambda:False)
+        self.assertFalse((Path(self.scratch.name)/'training'/'checkpoint').exists())
+
     def test_summary_checks_decoder_capacity_before_starting_optimizer(self):
         model=self.encoder_decoder(8,4)
         with patch.object(torch.optim,'AdamW',side_effect=AssertionError('optimizer created before target validation')):
@@ -706,3 +768,81 @@ class FineTuningTests(unittest.TestCase):
                 self.train('classification',examples,**settings)
         with self.assertRaisesRegex(ValueError,'original|source|separate'):
             ft.fine_tune(self.model(),'classification',examples,self.vision,{},lambda **kw:None,lambda:False)
+
+
+class MixedShapeAccumulationTests(unittest.TestCase):
+    def test_unequal_shape_subgroups_keep_each_example_gradient_weight(self):
+        # At parameter=.3 the individual losses are 2.89, .16 and 9.61,
+        # and derivatives are -3.4, -1.6 and -18.6. The shape groups have
+        # unequal cardinalities, so equal subgroup weighting would be wrong.
+        prepared=[(torch.full((2,3),1.),2.),(torch.full((2,3),2.),1.),
+                  (torch.full((3,2),3.),4.)]
+        for micro_size in (3,2,1):
+            with self.subTest(micro_size=micro_size):
+                parameter=torch.nn.Parameter(torch.tensor(.3))
+                def loss_for(chosen):
+                    losses=[((parameter*pixels-target)**2).mean() for pixels,target in chosen]
+                    return torch.stack(losses).mean(),len(chosen)
+                loss_for.group_key=lambda example:tuple(example[0].shape)
+                loss=ft._accumulate(torch,prepared,[0,1,2],micro_size,loss_for,[parameter],lambda:False)
+                self.assertAlmostEqual(loss,4.22,places=6)
+                self.assertAlmostEqual(float(parameter.grad),-118/15,places=6)
+
+
+class MixedShapeReplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Reuse the existing entirely local tiny diffusion fixture. This creates
+        # fresh random model weights and never downloads pretrained assets.
+        from test_generation_models import GenerationTests
+        GenerationTests.setUpClass.__func__(cls)
+
+    def test_cpu_injected_oom_replays_mixed_shapes_without_stale_gradients_or_rng(self):
+        from diffusers import UNet2DConditionModel
+        scratch=tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        directory=Path(scratch.name)
+        examples=[]
+        for index,size in enumerate(((128,64),(128,64),(64,128))):
+            desired=directory/f'target-{index}.png'
+            Image.new('RGB',size,('red','green','blue')[index]).save(desired)
+            examples.append({'input':'a cat','target':str(desired)})
+        results=[]
+        forward=UNet2DConditionModel.forward
+        for retry in (False,True):
+            seen=[]
+            failed=[False]
+            def observe(model,sample,*args,**kwargs):
+                seen.append(tuple(sample.shape[:1])+tuple(sample.shape[-2:]))
+                torch.rand(())  # Exercise the default RNG as well as diffusion's generator.
+                output=forward(model,sample,*args,**kwargs)
+                if retry and not failed[0] and len(seen)==2:
+                    def fail_backward(gradient):
+                        failed[0]=True
+                        raise torch.OutOfMemoryError('injected mixed-shape partial backward failure')
+                    output.sample.register_hook(fail_backward)
+                return output
+            # Classify the injected CPU allocation error as recoverable at the
+            # fault boundary; the actual optimizer, models, tensors and replay
+            # machinery execute on CPU. No CUDA memory operation is performed.
+            with patch.object(ft,'_batch_sizes',return_value=(3,3 if retry else 1)), \
+                    patch.object(ft,'_shuffled_indices',side_effect=lambda count,rng:iter(range(count))), \
+                    patch.object(ft,'_is_cuda_oom',side_effect=lambda library,error,device:isinstance(error,torch.OutOfMemoryError)), \
+                    patch.object(torch.cuda,'empty_cache',return_value=None), \
+                    patch.object(UNet2DConditionModel,'forward',observe):
+                result=ft.fine_tune({'source':'local','name':str(self.pipeline),'task':'generation'},
+                    'generation',examples,directory/f'training-{retry}',
+                    {'device':'cpu','generation_size':64,'batch_size':3,'seed':29,'learning_rate':.001},
+                    lambda **fields:None,lambda:False)
+            self.assertEqual(seen,[(2,24,44),(1,44,24),(1,24,44),(1,24,44),(1,44,24)]
+                             if retry else [(1,24,44),(1,24,44),(1,44,24)])
+            self.assertEqual(result['steps'],1)
+            self.assertEqual(result['processed_examples'],3)
+            self.assertEqual(result['micro_batch_size'],1)
+            self.assertEqual(result['oom_retries'],int(retry))
+            results.append(result)
+        self.assertAlmostEqual(results[0]['training_loss'],results[1]['training_loss'],places=6)
+        reference=load_file(Path(results[0]['checkpoint'])/'unet'/'diffusion_pytorch_model.safetensors')
+        replayed=load_file(Path(results[1]['checkpoint'])/'unet'/'diffusion_pytorch_model.safetensors')
+        for key,value in reference.items():
+            torch.testing.assert_close(replayed[key],value,rtol=1e-5,atol=1e-7)

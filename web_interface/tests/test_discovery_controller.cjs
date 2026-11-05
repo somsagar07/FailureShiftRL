@@ -28,6 +28,67 @@ const record=(input_index=0,action_id=4)=>({input_index,action_id,visits:1,sever
 const job=(extra={})=>({id:'discovery1',embedding_id:'emb1',task:'classification',status:'running',episode:1,episodes:10,epsilon:.96,loss:.12,reward:.4,mean_reward:.4,unique_evaluations:1,model_calls:2,records:[record()],baseline:[{input_index:0,output:{class_id:2,label:'cat',confidence:.9}}],current:{input_index:0,action_id:4},...extra});
 const tests=[];function test(name,fn){tests.push({name,fn});}
 
+test('generation adaptation submits resolution, framing, and optional unseen validation prompts',async()=>{
+  const f=setup('generation'),{controller:c,get,responses,calls}=f;f.ready();c.receive('discoveries',job({task:'generation',status:'completed'}),c.version);await openAdapt(f);
+  c.adaptation.targets.set(4,'/data/desired.png');get('finetune-generation-size').value='768';get('finetune-generation-framing').value='center_crop';
+  get('adapt-validation-prompts').value='A fox beside a green bicycle.\n\n A white teapot on a shelf.';
+  responses.push({id:'train1',status:'running'});await c.adaptation.start();
+  assert.equal(calls.at(-1).body.generation_size,768);assert.equal(calls.at(-1).body.generation_framing,'center_crop');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1).body.validation_data)),[{prompt:'A fox beside a green bicycle.'},{prompt:'A white teapot on a shelf.'}]);
+  assert.equal(calls.at(-1).body.validation_repeats,1);assert.equal(f.checkpoints.length,0);
+});
+
+test('validation verdict shows measured severities and keeps checkpoint selection explicit',()=>{
+  const f=setup('generation'),{controller:c,get}=f;f.ready();c.receive('discoveries',job({task:'generation',status:'completed'}),c.version);
+  const comparison={selected:{before_mean_severity:.7,after_mean_severity:.3},clean:{before_mean_severity:.2,after_mean_severity:.21},prompt_count:2};
+  for(const verdict of ['improved','inconclusive','regressed']){
+    c.receive('finetunes',{id:'train1',status:'completed',checkpoint:'/models/candidate',validation:{status:'completed',comparison:{...comparison,verdict}}},c.version);
+    const text=get('finetune-validation-status').textContent;
+    assert.equal(get('finetune-validation-status').hidden,false);assert.match(text,new RegExp(verdict));
+    assert.match(text,/selected.*0\.700.*0\.300.*clean.*0\.200.*0\.210/i);assert.doesNotMatch(text,/accuracy|probability/i);
+    assert.equal(/measured improvement/i.test(text),verdict==='improved');
+    assert.equal(f.checkpoints.length,0,'a verdict never selects a checkpoint automatically');assert.equal(get('finetune-use').disabled,false);
+    assert.equal(/candidate/i.test(get('finetune-use').textContent),verdict!=='improved');
+  }
+  get('finetune-use').events.click();assert.deepEqual(f.checkpoints,['/models/candidate']);
+});
+
+test('unfinished or failed validation cannot select a saved checkpoint and legacy jobs stay usable',()=>{
+  const f=setup('generation'),{controller:c,get}=f;f.ready();c.receive('discoveries',job({task:'generation',status:'completed'}),c.version);
+  for(const status of ['pending','running','error','cancelled']){
+    c.receive('finetunes',{id:'train1',status:'completed',checkpoint:'/models/unvalidated',validation:{status}},c.version);
+    assert.equal(get('finetune-use').disabled,true);get('finetune-use').events.click();assert.equal(f.checkpoints.length,0);
+    assert.match(get('finetune-validation-status').textContent,new RegExp(status));
+  }
+  c.receive('finetunes',{id:'train2',status:'completed',checkpoint:'/models/legacy'},c.version);
+  assert.equal(get('finetune-validation-status').hidden,true);assert.equal(get('finetune-validation-status').textContent,'');
+  assert.equal(get('finetune-use').disabled,false);get('finetune-use').events.click();assert.deepEqual(f.checkpoints,['/models/legacy']);
+  c.invalidate();assert.equal(get('finetune-validation-status').hidden,true);
+});
+
+test('generation options follow workspace changes and holdouts do not cross domains',()=>{
+  const f=setup('generation'),{controller:c,get,explorer}=f;
+  assert.equal(get('finetune-generation-options').hidden,false);assert.equal(get('adapt-validation-fields').hidden,false);
+  get('finetune-generation-size').value='1024';get('finetune-generation-framing').value='center_crop';get('adapt-validation-prompts').value='An unseen scene';
+  explorer.task='classification';c.configure();c.controls();
+  assert.equal(get('finetune-generation-options').hidden,true);assert.equal(get('adapt-validation-fields').hidden,true);assert.equal(get('adapt-validation-prompts').value,'');
+  explorer.task='generation';c.configure();c.controls();
+  assert.equal(get('finetune-generation-size').value,'1024');assert.equal(get('finetune-generation-framing').value,'center_crop');
+  assert.equal(get('adapt-validation-prompts').value,'');assert.equal(get('finetune-generation-options').hidden,false);
+});
+
+test('new training and discovery clear old validation outcomes before another checkpoint can be used',async()=>{
+  const f=setup(),{controller:c,get,responses}=f;f.ready();c.receive('discoveries',job({status:'completed'}),c.version);await openAdapt(f);
+  const completed={id:'train1',status:'completed',checkpoint:'/old/model',validation:{status:'completed',comparison:{verdict:'improved'}}};
+  c.receive('finetunes',completed,c.version);
+  let finish;responses.push(()=>new Promise(resolve=>{finish=resolve;}));const starting=c.adaptation.start();
+  assert.equal(get('finetune-validation-status').hidden,true);assert.equal(get('finetune-validation-status').textContent,'');
+  assert.equal(get('finetune-use').disabled,true);get('finetune-use').events.click();assert.equal(f.checkpoints.length,0);
+  finish({...completed,id:'train2'});await starting;
+  c.adaptation.close();responses.push(job({id:'next-discovery',status:'completed'}));await c.start();
+  assert.equal(get('finetune-validation-status').hidden,true);assert.equal(get('finetune-validation-status').textContent,'');
+});
+
 test('generation submits one combined reward with its supported judge and severity threshold',async()=>{
   const f=setup('generation'),{controller:c,get,explorer,responses,calls}=f;
   explorer.preview={config:{task:'generation',dataset_id:'prompts'},dataset:{count:2,checked_count:2,missing_checks_count:0}};
@@ -760,6 +821,22 @@ test('automatic and manual effective batch sizes reach training in every workspa
   }
 });
 
+test('fine-tuning sends each workspace default and preserves explicit learning rates across switches',async()=>{
+  for(const [task,expected] of [['classification',.001],['summarization',.00002],['generation',.0001]]) {
+    const f=setup(task),{controller:c,get,responses,calls,explorer}=f;
+    f.ready();c.receive('discoveries',job({task,status:'completed'}),c.version);await openAdapt(f);
+    assert.equal(Number(get('finetune-lr').value),expected);
+    responses.push({id:'train1',status:'completed'});await c.startTraining({action_ids:[4]});
+    assert.equal(calls.at(-1).body.learning_rate,expected);
+    get('finetune-lr').value='0.000007';c.configure();
+    explorer.task=task==='generation'?'classification':'generation';c.configure();
+    explorer.task=task;c.configure();
+    assert.equal(get('finetune-lr').value,'0.000007');
+    responses.push({id:'train2',status:'completed'});await c.startTraining({action_ids:[4]});
+    assert.equal(calls.at(-1).body.learning_rate,.000007);
+  }
+});
+
 test('fine-tuning submits independent seed, optimizer and cleanup options in every workspace',async()=>{
   for(const task of ['classification','summarization','generation']) {
     const f=setup(task),{controller:c,get,responses,calls}=f;f.ready();c.receive('discoveries',job({task,status:'completed'}),c.version);await openAdapt(f);
@@ -831,6 +908,82 @@ test('failed POSTs stop displaying a starting status and allow a retry',async()=
   responses.push(new Error('training request failed'));await c.adaptation.start();
   assert.doesNotMatch(get('finetune-status').textContent,/Starting/);assert.equal(get('finetune-start').disabled,false);
   assert.match(get('adapt-error').textContent,/training request failed/);
+});
+
+test('analysis summary separates measured status counts and coverage from DQN estimates',()=>{
+  const f=setup(),{controller:c,get}=f;f.ready();
+  c.receive('discoveries',job({status:'completed',analysis_summary:{unique_pairs:4,inputs_evaluated:2,total_inputs:10,total_pairs:50,
+    counts:{failure:1,candidate:1,no_failure_observed:1,inconclusive:1},baseline_counts:{failure:0,candidate:0,no_failure_observed:1,inconclusive:1},baseline_inputs:2}}),c.version);
+  const text=content(get('discovery-analysis-summary'));
+  assert.equal(get('discovery-analysis-summary').hidden,false);
+  assert.match(text,/1 failure.*1 candidate.*1 no flag.*1 inconclusive/i);
+  assert.match(text,/4\s*\/\s*50.*pairs.*2\s*\/\s*10.*inputs/i);
+  assert.match(text,/baseline.*2.*1 no flag.*1 inconclusive/i);
+  assert.match(text,/no flag.*does not.*correct/i);
+  assert.equal(c.landscapeMode,'predicted','analysis evidence must not change the selected DQN graph mode');
+  assert.equal(get('discovery-inspector').hidden,true,'summary counts do not open per-pair outputs');
+  c.invalidate();assert.equal(get('discovery-analysis-summary').hidden,true);
+  f.ready();c.receive('discoveries',job({status:'completed'}),c.version);
+  assert.equal(get('discovery-analysis-summary').hidden,true,'legacy reports cannot retain counts from another run');
+});
+
+test('Inspect renders candidate reasons and uncertainty without turning policy replays into measurements',()=>{
+  const f=setup(),{controller:c,get,explorer}=f;f.ready();
+  explorer.predictionFor=()=>({q_value:.95,preference:.8});
+  const analysis={version:1,status:'candidate',basis:'model_judge',reasons:[{code:'quality_drop',message:'Quality fell after the action.'}],warnings:[{code:'meaning_change',message:'The edit may change the expected answer.'}]};
+  c.receive('discoveries',job({status:'completed',baseline:[{input_index:0,analysis:{version:1,status:'no_failure_observed',basis:'label',reasons:[],warnings:[]},output:{label:'cat',class_id:2,confidence:.9}}],
+    records:[{...record(),visits:9,measurements:1,seed:42,analysis}]}),c.version);
+  assert.equal(content(get('discovery-output')).includes('expected answer'),false,'pair evidence is rendered only after Inspect');
+  assert.match(get('discovery-pair').children[1].textContent,/Candidate.*1 measured.*8 cached reuses/i);
+  inspect(get);
+  const result=content(get('discovery-components'));
+  assert.match(result,/Candidate.*model judge.*Quality fell after the action.*The edit may change the expected answer/s);
+  assert.match(result,/Measured results.*1.*Cached reuses.*8.*Seed.*42/s);
+  assert.doesNotMatch(result,/Observed failure rate/);
+  assert.doesNotMatch(result,/confirmed failure/i);
+  assert.match(content(get('discovery-baseline-analysis')),/No flag.*does not.*correct/i);
+  assert.match(result,/Predicted reward.*0\.950/,'estimated values remain available with their existing label');
+  c.inspectPair(0,8);inspect(get,'0:8');
+  assert.doesNotMatch(content(get('discovery-components')),/Quality fell|expected answer/,'unevaluated pairs do not inherit selected-record conclusions');
+  assert.match(content(get('discovery-components')),/not been evaluated.*Estimated only/);
+});
+
+test('a fresh observation is not counted as cached reuse and incomplete visit counts never go negative',()=>{
+  const f=setup(),{controller:c,get}=f;f.ready();
+  for(const visits of [0,1]) {
+    c.receive('discoveries',job({status:'completed',records:[{...record(),visits,measurements:1}]}),c.version);
+    assert.match(get('discovery-pair').children[1].textContent,/1 measured.*0 cached reuses/);
+    inspect(get);assert.match(content(get('discovery-components')),/Measured results.*1.*Cached reuses.*0/);
+  }
+});
+
+test('summary grounding claims expose support, evidence and formatting sensitivity only under output details',()=>{
+  const f=setup('summarization'),{controller:c,get}=f;f.ready();
+  const output={summary:'The trial failed.',grounding:{reliable:false,source_support:null,format_delta:.4,
+    claims:[{text:'The trial failed.',support:null,evidence:'The trial succeeded in June.',format_delta:.4}],warnings:[{code:'format_sensitive',message:'Grounding changes with capitalization.'}]},
+    input_analysis:{status:'review',warnings:[{code:'meaning_change',message:'The action may alter the source meaning.'}]}};
+  c.receive('discoveries',job({task:'summarization',status:'completed',records:[{...record(),measurements:1,seed:4,analysis:{version:1,status:'inconclusive',basis:'grounding',reasons:[],warnings:[]},output}]}),c.version);
+  assert.equal(content(get('discovery-output')).includes('The trial failed.'),false);
+  inspect(get);
+  const detail=get('discovery-output').children.find(node=>node.className==='reference-disclosure grounding-evidence');
+  assert.ok(detail,'claim-level evidence belongs in a closed details disclosure');assert.notEqual(detail.open,true);
+  assert.match(content(detail),/Source grounding.*Unavailable.*format.*0\.400.*The trial failed.*The trial succeeded in June/s);
+  assert.match(content(get('discovery-output')),/Grounding changes with capitalization.*The action may alter the source meaning/s);
+  assert.doesNotMatch(content(detail),/null|NaN/,'missing grounding is not a measured zero');
+});
+
+test('shared grounding warnings appear once and partial claim support retains its incomplete status',()=>{
+  const f=setup('summarization'),{controller:c,get}=f;f.ready();
+  const warning={code:'partial_grounding',message:'Some source windows were not scored.'};
+  c.receive('discoveries',job({task:'summarization',status:'completed',records:[{...record(),measurements:1,
+    analysis:{version:1,status:'inconclusive',basis:'reference_and_source_review',reasons:[],warnings:[warning]},
+    output:{summary:'The trial succeeded.',grounding:{reliable:false,source_support:null,format_delta:null,warnings:[warning],claims:[
+      {text:'The trial succeeded.',support:.9,evidence:'The trial succeeded.',format_delta:.1,status:'partial',reliable:false}
+    ]}}}]}),c.version);
+  inspect(get);
+  const output=content(get('discovery-output')),all=output+' '+content(get('discovery-components'));
+  assert.equal(all.split(warning.message).length-1,1,'shared whole-pair warnings should not be repeated in two panels');
+  assert.match(output,/Support: 90\.0%.*partial/i,'an incomplete claim score cannot look like a complete measurement');
 });
 
 (async()=>{let failures=0;for(const {name,fn} of tests){try{await fn();console.log('ok - '+name);}catch(error){failures++;console.error('not ok - '+name+'\n'+error.stack);}}if(failures)process.exitCode=1;else console.log(`${tests.length} discovery controller tests passed`);})();

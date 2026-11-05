@@ -6,11 +6,13 @@
   <title>FailureShift</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/robotics.css">
   <script src="/graph.js" defer></script>
   <script src="/embedding-view.js" defer></script>
   <script src="/embedding-controller.js" defer></script>
   <script src="/adaptation-controller.js" defer></script>
   <script src="/discovery-controller.js" defer></script>
+  <script src="/robotics-controller.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body id="workspace-shell" data-sidebar-collapsed="false">
@@ -26,6 +28,7 @@
       <button type="button" class="domain active" data-task="classification" aria-label="Image classification" aria-current="page" title="Image classification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m4 18 5-5 4 4 3-3 5 5"/></svg><span class="domain-label">Image classification</span></button>
       <button type="button" class="domain" data-task="summarization" aria-label="Summarization" title="Summarization"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14M5 8h14M5 12h9M5 17h6m-3-3 3 3-3 3"/></svg><span class="domain-label">Summarization</span></button>
       <button type="button" class="domain" data-task="generation" aria-label="Image generation" title="Image generation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M14 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-9M4 18l5-5 4 4 3-3 4 4M18 1l1.2 3.8L23 6l-3.8 1.2L18 11l-1.2-3.8L13 6l3.8-1.2Z"/></svg><span class="domain-label">Image generation</span></button>
+      <button type="button" class="domain" data-task="robotics" aria-label="Robosuite" title="Robosuite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 21h16M7 21v-4l5-5m0 0L7 7m5 5 5-5M5 4l3-2 3 3-3 3ZM16 4h5v5l-3 2-3-3"/><circle cx="12" cy="12" r="2.5"/></svg><span class="domain-label">Robosuite</span></button>
     </nav>
   </aside>
   <main>
@@ -45,6 +48,11 @@
             <input id="model-name" type="text" placeholder="/path/to/saved-huggingface-model" autocomplete="off">
           </div>
           <p id="model-help" class="hint">Runs locally · downloads on first use.</p>
+          <div id="candidate-labels-field" hidden>
+            <label for="candidate-labels">Candidate classes <span class="hint">optional</span></label>
+            <textarea id="candidate-labels" rows="2" placeholder="cat, dog — blank uses dataset class names"></textarea>
+            <p class="hint">For CLIP zero-shot classification. Include all classes the inputs can belong to.</p>
+          </div>
           <p id="model-status" class="hint" aria-live="polite"></p>
 
           <h2>Input</h2>
@@ -176,7 +184,7 @@
           <select id="action-add"><option value="">＋ Add action…</option></select>
           <div id="action-chips" class="action-chips" aria-label="Selected actions"></div>
           <div id="action-editor" class="action-values" hidden></div>
-          <button type="button" id="reset-actions">Restore all actions</button>
+          <button type="button" id="reset-actions">Restore defaults</button>
           <p id="action-error" class="error" role="alert" hidden></p>
           <details id="analysis-additional-options" class="analysis-options"><summary>Additional options</summary>
             <label for="analysis-device">Analyze device</label>
@@ -230,7 +238,7 @@
             <a id="analysis-report" class="report-link" target="_blank" rel="noopener noreferrer" hidden>Open analysis report ↗</a>
             <div class="discovery-launch" role="group" aria-label="Workflow panels"><button id="find-failure" type="button" disabled aria-controls="discovery-panel" aria-pressed="false">Find failure</button><button id="adapt" type="button" disabled aria-controls="adapt-panel" aria-expanded="false" aria-pressed="false">Adapt</button><button id="discovery-retry" type="button" hidden>Retry status</button></div>
             <ul id="severity-legend" class="discovery-legend" aria-label="Discovery graph legend" hidden>
-              <li><label for="landscape-mode">View</label><select id="landscape-mode"><option value="predicted">Predicted</option><option value="measured">Measured</option></select></li>
+              <li><label for="landscape-mode">View</label><select id="landscape-mode"><option value="predicted">Predicted (DQN reward)</option><option value="measured">Measured (severity)</option></select></li>
               <li id="landscape-scale"><span id="landscape-scale-label">Predicted reward</span> Low <span class="severity-gradient" aria-hidden="true"></span> High</li>
               <li><i class="legend-dot" aria-hidden="true"></i><span id="landscape-unavailable">Awaiting learning</span></li>
               <li id="landscape-evidence" title="Dashed: estimated only. Solid: model evaluated. For an original input, solid means at least one action was tested." hidden><i class="legend-dot legend-estimated" aria-hidden="true"></i>Estimated<i class="legend-dot legend-tested" aria-hidden="true"></i>Tested</li>
@@ -265,6 +273,11 @@
             <div id="adapt-targets"></div>
             <label id="adapt-originals-field" class="adapt-checkbox"><input id="adapt-include-originals" type="checkbox" checked>Include original inputs</label>
             <p id="adapt-training-count" role="status" class="hint"></p>
+            <div id="adapt-validation-fields" hidden>
+              <label for="adapt-validation-prompts">Validation prompts <span class="hint">optional</span></label>
+              <textarea id="adapt-validation-prompts" rows="3" maxlength="200000" aria-describedby="adapt-validation-help" placeholder="One unseen original scene prompt per line"></textarea>
+              <p id="adapt-validation-help" class="hint">Up to 64 unseen original scenes, one per line. Keep them separate from training scenes and captions. Compares selected actions and clean prompts before and after training.</p>
+            </div>
             <div class="compact-row"><label>Epochs <input id="finetune-epochs" type="number" min="1" max="100" value="1"></label><label>Learning rate <input id="finetune-lr" type="number" min="0.00000001" max="0.1" step="any" value="0.001"></label></div>
             <details id="finetune-additional-options" class="training-options"><summary>Additional options</summary>
               <label for="finetune-device">Training device</label>
@@ -272,6 +285,13 @@
               <label for="finetune-batch-size">Batch size</label>
               <select id="finetune-batch-size" aria-describedby="finetune-batch-help"><option value="auto">Automatic</option><option value="1">1</option><option value="2">2</option><option value="4">4</option><option value="8">8</option><option value="16">16</option><option value="32">32</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select>
               <p id="finetune-batch-help" class="hint">Examples per update. Smaller chunks are accumulated when GPU memory is limited.</p>
+              <div id="finetune-generation-options" hidden>
+                <label for="finetune-generation-size">Training resolution</label>
+                <select id="finetune-generation-size"><option value="auto">Automatic (model native)</option><option value="256">256</option><option value="512">512</option><option value="768">768</option><option value="1024">1024</option></select>
+                <label for="finetune-generation-framing">Target framing</label>
+                <select id="finetune-generation-framing" aria-describedby="finetune-generation-framing-help"><option value="preserve">Preserve full image</option><option value="center_crop">Center crop</option></select>
+                <p id="finetune-generation-framing-help" class="hint">Preserve keeps the full scene. Center crop trims edges to fit the training resolution.</p>
+              </div>
               <label for="finetune-seed">Training seed</label>
               <input id="finetune-seed" type="number" min="0" max="4294967295" step="1" value="42" aria-describedby="finetune-seed-help">
               <p id="finetune-seed-help" class="hint">Controls training randomness, independently of Find failure.</p>
@@ -288,6 +308,7 @@
           <p id="finetune-status" role="status"></p><progress id="finetune-progress" value="0" max="1" hidden></progress>
           <p id="finetune-batch-info" class="hint" role="status"></p>
           <p id="finetune-cleanup-status" class="hint" role="status" hidden></p>
+          <p id="finetune-validation-status" class="hint" role="status" hidden></p>
           <a id="finetune-report" class="report-link" target="_blank" rel="noopener noreferrer" hidden>Open adaptation report ↗</a>
           <div id="finetune-checkpoint" hidden><label for="finetune-path">Saved local model</label><input id="finetune-path" type="text" readonly><button id="finetune-use" type="button">Select checkpoint for Analyze</button><p class="hint">Evaluate this checkpoint on held-out inputs to measure improvement.</p></div>
         </section>
@@ -347,10 +368,11 @@
           </fieldset>
           <div class="job-buttons"><button id="discovery-start" type="button">Start discovery</button><button id="discovery-cancel" type="button" hidden>Cancel discovery</button></div>
           <p id="discovery-status" role="status"></p><p id="discovery-error" class="error" role="alert" hidden></p><p id="discovery-metrics" class="hint"></p><p id="discovery-criterion" class="hint"></p>
+          <div id="discovery-analysis-summary" class="analysis-summary" role="status" hidden></div>
           <progress id="discovery-progress" max="100" value="0" hidden></progress>
           <div id="discovery-artifacts"></div>
           <div id="discovery-records" hidden><label for="discovery-pair">Inspect</label><select id="discovery-pair"><option value="">Select an input/action…</option></select></div>
-          <div id="discovery-inspector" hidden><h3>Model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">Preference variation is not failure confidence.</p></div>
+          <div id="discovery-inspector" hidden><h3>Model outputs</h3><div class="input-pair"><section><h4>Original output</h4><div id="discovery-baseline-analysis" hidden></div><div id="discovery-baseline"></div></section><section><h4>Selected action output</h4><div id="discovery-output"></div></section></div><div id="discovery-components"></div><p class="hint">DQN estimates and preference variation are not failure confidence. Cached reuses do not add measurements.</p></div>
         </section>
         <div id="graph-wrap" class="graph-wrap" hidden>
           <div class="graph-toolbar">
@@ -373,6 +395,204 @@
         </div>
       </section>
     </div>
+    <section id="robotics-workspace" class="robotics-workspace" aria-label="Robosuite workspace" hidden>
+      <form id="robotics-form">
+        <div class="robotics-runtime">
+          <p id="robotics-runtime-status" class="hint" role="status">Loading the simulation catalog…</p>
+          <p id="robotics-runtime-command" class="hint" hidden></p>
+          <button id="robotics-runtime-retry" type="button" hidden>Refresh runtime status</button>
+        </div>
+        <fieldset id="robotics-config" disabled>
+          <h2>Environment</h2>
+          <label for="robotics-task">Task</label>
+          <select id="robotics-task"></select>
+          <div id="robotics-custom-task-fields" hidden>
+            <label for="robotics-custom-task">Installed task name</label>
+            <input id="robotics-custom-task" type="text" placeholder="Custom registered task" autocomplete="off">
+          </div>
+          <div class="robotics-two-columns">
+            <label for="robotics-robot">Robot<select id="robotics-robot"></select></label>
+            <label for="robotics-controller">Controller<select id="robotics-controller"></select></label>
+          </div>
+          <div id="robotics-robots-fields" hidden>
+            <label for="robotics-robots">Robot names</label>
+            <input id="robotics-robots" type="text" value="Panda" autocomplete="off" aria-describedby="robotics-robots-help">
+            <p id="robotics-robots-help" class="hint">Comma-separated robot names. Two-arm presets use two single-arm robots or one bimanual Baxter.</p>
+          </div>
+          <details class="robotics-options">
+            <summary>Environment settings</summary>
+            <div class="robotics-two-columns">
+              <label for="robotics-horizon">Episode step limit<input id="robotics-horizon" type="number" min="1" max="10000" step="1" value="300" required></label>
+              <label for="robotics-frequency">Control frequency (Hz)<input id="robotics-frequency" type="number" min="1" max="100" step="1" value="20" required></label>
+            </div>
+            <label for="robotics-seed">Seed<input id="robotics-seed" type="number" min="0" max="2147482647" step="1" value="42" required></label>
+          </details>
+          <button id="robotics-load-environment" type="button" disabled>Load environment</button>
+          <p id="robotics-environment-status" class="hint" role="status">Preview this scene before choosing a policy.</p>
+          <label for="robotics-instruction">Task instruction</label>
+          <textarea id="robotics-instruction" rows="3" maxlength="4000" placeholder="Describe the task for a language-conditioned policy."></textarea>
+          <p class="hint">Passed to language-conditioned policies, including LeRobot VLA policies. Task success is measured by the selected environment.</p>
+
+          <h2>Policy</h2>
+          <label for="robotics-starter-policy">Starter policy</label>
+          <div class="robotics-starter-controls">
+            <select id="robotics-starter-policy"><option value="">Custom policy</option></select>
+            <button id="robotics-refresh-starters" type="button" aria-label="Refresh starter policies">Refresh</button>
+          </div>
+          <p id="robotics-starter-status" class="hint" role="status"></p>
+          <p id="robotics-starter-details" class="hint" hidden></p>
+          <label for="robotics-policy-format">Policy format</label>
+          <select id="robotics-policy-format"></select>
+          <label for="robotics-policy-source">Policy source</label>
+          <select id="robotics-policy-source"></select>
+          <div id="robotics-policy-name-fields">
+            <label id="robotics-policy-name-label" for="robotics-policy-name">Server checkpoint path</label>
+            <input id="robotics-policy-name" type="text" placeholder="/path/to/policy" autocomplete="off">
+          </div>
+          <div id="robotics-policy-revision-fields" hidden>
+            <label for="robotics-policy-revision">Hugging Face revision <span class="hint">optional</span></label>
+            <input id="robotics-policy-revision" type="text" placeholder="Branch, tag, or commit" autocomplete="off">
+          </div>
+          <div id="robotics-policy-upload-fields" hidden>
+            <div id="robotics-checkpoint-file-fields">
+              <label for="robotics-policy-file">Checkpoint and optional metadata/statistics files</label>
+              <input id="robotics-policy-file" type="file" multiple>
+              <p class="hint">Select one native checkpoint. Include its metadata JSON or SB3 VecNormalize file when used during training.</p>
+            </div>
+            <div id="robotics-policy-folder-fields" hidden>
+              <button id="robotics-choose-folder" type="button">Choose LeRobot policy folder…</button>
+              <input id="robotics-policy-folder" type="file" webkitdirectory multiple hidden>
+              <p class="hint">Choose the saved policy folder with its configuration, weights, and processor files.</p>
+            </div>
+            <p id="robotics-upload-status" class="hint" role="status">Choose a policy to upload.</p>
+            <progress id="robotics-upload-progress" max="100" value="0" hidden></progress>
+          </div>
+          <div id="robotics-sb3-fields" hidden>
+            <label for="robotics-sb3-algorithm">Stable-Baselines3 algorithm</label>
+            <select id="robotics-sb3-algorithm"><option value="PPO">PPO</option><option value="SAC">SAC</option><option value="TD3">TD3</option><option value="A2C">A2C</option><option value="DDPG">DDPG</option></select>
+          </div>
+          <p id="robotics-policy-help" class="hint"></p>
+          <details id="robotics-policy-notes" class="robotics-policy-notes" hidden>
+            <summary id="robotics-policy-notes-title">Policy notes</summary>
+            <ul id="robotics-policy-notes-list"></ul>
+          </details>
+          <details class="robotics-options">
+            <summary>Observation and action mapping</summary>
+            <p class="hint">Match the checkpoint’s feature schema, camera names, robot, and controller units. A downloaded VLA policy needs a compatible robot and explicit mappings.</p>
+            <label for="robotics-mapping">Adapter mapping JSON</label>
+            <textarea id="robotics-mapping" rows="7" spellcheck="false" aria-describedby="robotics-mapping-help">{}</textarea>
+            <div id="robotics-mapping-help" class="hint robotics-mapping-help">
+              <p><code>state_keys</code> / <code>state_indices</code>: ordered state inputs. <code>observation_map</code>: checkpoint feature names mapped to environment observation keys, including cameras.</p>
+              <p><code>action_indices</code>, <code>action_scale</code>, <code>action_offset</code>: controller action mapping. <code>state_mean</code> / <code>state_std</code>: explicit state normalization.</p>
+              <p><code>torchscript_input</code> and <code>clip_actions</code> configure compatible adapters. Empty JSON uses the adapter’s validated defaults.</p>
+            </div>
+          </details>
+
+          <h2>Environment variations</h2>
+          <p class="hint">Each enabled group contributes values to the search space.</p>
+          <div id="robotics-action-chips" class="action-chips"></div>
+          <div id="robotics-action-editor" class="action-values" hidden></div>
+          <label class="sr-only" for="robotics-action-add">Add a variation group</label>
+          <select id="robotics-action-add"><option value="">＋ Add variation group…</option></select>
+          <p id="robotics-action-count" class="hint"></p>
+          <button id="robotics-reset-actions" type="button">Restore defaults</button>
+          <p id="robotics-action-error" class="error" hidden></p>
+          <label for="robotics-episodes">Baseline episodes<input id="robotics-episodes" type="number" min="1" max="1000" step="1" value="3" required></label>
+          <p class="hint">One original graph point per episode.</p>
+          <input id="robotics-budget" type="hidden" min="1" max="5000" value="12">
+          <details class="robotics-options">
+            <summary>Evaluation options</summary>
+            <label for="robotics-device">Policy inference device<select id="robotics-device"><option value="auto">Automatic</option><option value="cuda">CUDA GPU</option><option value="cpu">CPU</option></select></label>
+            <label class="robotics-checkbox"><input id="robotics-record-video" type="checkbox" checked> Save episode replays</label>
+          </details>
+        </fieldset>
+        <button id="robotics-analyze" type="submit" class="primary" disabled>Analyze</button>
+        <p class="hint">Analyze builds the episode graph. Find failure opens DQN exploration settings.</p>
+        <p id="robotics-error" class="error" role="alert" hidden></p>
+      </form>
+
+      <div class="robotics-results">
+        <div class="robotics-results-heading">
+          <div><h2 id="robotics-results-title">Environment and evaluation</h2><p id="robotics-results-subtitle" class="hint">Preview a scene, then measure a policy.</p></div>
+        </div>
+        <div class="robotics-job-status">
+          <p id="robotics-status" role="status">Load an environment to preview it. Choose a compatible policy and Analyze to measure task success.</p>
+          <p id="robotics-step-status" class="hint"></p>
+          <progress id="robotics-progress" max="100" value="0" hidden></progress>
+          <p id="robotics-stale" class="hint" hidden>Previous evaluation shown. Settings or the selected starter changed. Analyze again before finding failures.</p>
+          <details id="robotics-baseline-errors" hidden><summary id="robotics-baseline-error-title">Baseline rollout errors</summary><ul id="robotics-baseline-error-list"></ul></details>
+        </div>
+        <section id="robotics-environment-summary" class="robotics-environment-summary" aria-label="Loaded environment" hidden>
+          <p id="robotics-environment-details"></p>
+          <p id="robotics-environment-stale" class="hint" hidden>Environment settings changed. Load again to update this preview.</p>
+          <figure id="robotics-environment-preview" hidden><img id="robotics-environment-image" alt="Loaded Robosuite environment"><figcaption id="robotics-environment-caption" class="hint"></figcaption></figure>
+          <details class="robotics-options"><summary>Observation and camera details</summary><dl id="robotics-environment-observations"></dl></details>
+        </section>
+        <div id="robotics-metrics" class="robotics-metrics" hidden>
+          <section><h3>Baseline task success</h3><p id="robotics-baseline-rate" class="robotics-metric">—</p><p id="robotics-baseline-detail" class="hint"></p></section>
+          <section><h3>Observed variation failures</h3><p id="robotics-failure-rate" class="robotics-metric">—</p><p id="robotics-failure-detail" class="hint"></p></section>
+          <section><h3>Paired outcomes</h3><p id="robotics-paired" class="robotics-metric">—</p><p id="robotics-error-count" class="hint"></p></section>
+        </div>
+        <div class="robotics-graph-layout">
+          <div class="robotics-graph-column">
+        <div id="robotics-search-space" class="robotics-graph-wrap">
+          <div class="robotics-graph-toolbar"><span id="robotics-graph-count" class="hint">No episodes analyzed</span><div class="robotics-graph-buttons"><button id="robotics-graph-zoom-out" type="button" aria-label="Zoom out">−</button><span id="robotics-graph-zoom" class="hint">100%</span><button id="robotics-graph-zoom-in" type="button" aria-label="Zoom in">+</button><button id="robotics-graph-fit" type="button">Fit</button></div></div>
+          <div class="robotics-landscape-controls"><label for="robotics-landscape-mode">Color by<select id="robotics-landscape-mode"><option value="measured">Observed outcomes</option><option value="predicted">DQN expected reward · estimate</option></select></label><span id="robotics-landscape-note" class="hint">Green: task success · red: task failure · gray: untested.</span></div>
+          <div id="robotics-graph-empty"><p>Analyze the baseline to build the episode graph.</p><p class="hint">Select an original to expand its environment variations.</p></div>
+          <canvas id="robotics-graph" tabindex="0" role="group" aria-label="3D episode feature graph. Click an original to expand variations; click a child to inspect it. Drag to orbit, Shift-drag or right-drag to pan, scroll to zoom. Arrow keys orbit, plus and minus zoom, zero fits, Escape clears. Use the episode and variation selectors in Inspect." hidden></canvas>
+          <ul id="robotics-observed-legend" class="robotics-legend" aria-label="Observed graph outcomes"><li><i class="robotics-dot robotics-success"></i>Observed success</li><li><i class="robotics-dot robotics-failure"></i>Observed failure</li><li><i class="robotics-dot robotics-unmeasured"></i>Untested</li><li><i class="robotics-dot robotics-untested"></i>Dashed: position pending</li><li><i class="robotics-dot robotics-error-dot"></i>Rollout error</li><li><i class="robotics-dot robotics-current"></i>Current pair</li></ul>
+          <ul id="robotics-estimate-legend" class="robotics-legend" aria-label="Estimated reward colors" hidden><li><i class="robotics-dot robotics-success"></i>Lower estimated reward</li><li><i class="robotics-dot robotics-failure"></i>Higher estimated reward</li><li><i class="robotics-dot robotics-untested"></i>Dashed: position pending</li><li><i class="robotics-dot robotics-error-dot"></i>Rollout error</li><li><i class="robotics-dot robotics-current"></i>Current pair</li></ul>
+          <p id="robotics-size-note" class="hint robotics-coordinate-note" hidden>Child size: larger = lower DQN preference variation · purple dashed rim: unavailable.</p>
+          <p id="robotics-coordinate-note" class="hint robotics-coordinate-note">Originals represent episode feature means. Untested children use a pending layout until evaluated.</p>
+          <p class="hint robotics-coordinate-note">Drag to orbit · Shift-drag to pan · scroll to zoom · select an original, then a variation.</p>
+        </div>
+          <div class="robotics-run-buttons"><button id="robotics-show-evaluation" type="button" hidden>Show last evaluation</button><button id="robotics-discover" type="button" aria-controls="robotics-search-panel" aria-expanded="false" disabled>Find failure</button><button id="robotics-finetune" type="button" disabled title="Robotics fine-tuning is not available yet.">Fine-tune</button><button id="robotics-cancel" type="button" hidden>Cancel</button></div>
+          </div>
+        <section id="robotics-inspector" class="robotics-inspector" aria-label="Inspect episode" hidden>
+          <h3>Inspect</h3>
+          <div class="robotics-two-columns"><label for="robotics-episode">Original episode<select id="robotics-episode"><option value="">Select an episode…</option></select></label><label for="robotics-inspect">Variation · failures first<select id="robotics-inspect"><option value="">Baseline episode</option></select></label></div>
+          <div id="robotics-selection" hidden>
+            <h3 id="robotics-selected-title"></h3>
+            <p id="robotics-selected-values" class="hint"></p>
+            <p id="robotics-selected-outcome"></p>
+            <p id="robotics-selected-note" class="hint"></p>
+            <div class="robotics-replays"><section><h4>Original episode</h4><p id="robotics-baseline-outcome" class="hint"></p><div id="robotics-baseline-media"></div></section><section id="robotics-variation-replay"><h4>Selected variation</h4><div id="robotics-variation-media"></div></section></div>
+            <div id="robotics-episode-table" class="robotics-table-wrap"></div>
+          </div>
+        </section>
+        <form id="robotics-search-panel" class="robotics-search-panel" aria-label="DQN failure discovery settings" hidden>
+          <div class="robotics-search-heading"><h3>Find failure with DQN</h3><button id="robotics-close-search" type="button" aria-label="Close discovery settings">×</button></div>
+          <p class="hint">Choose environment variations from each episode’s policy features. The robot policy stays fixed.</p>
+          <fieldset id="robotics-search-fields">
+            <div class="robotics-two-columns">
+              <label for="robotics-search-episodes">RL steps<input id="robotics-search-episodes" type="number" min="1" max="10000" step="1" value="200" required></label>
+              <label for="robotics-search-rollouts">New rollout budget<input id="robotics-search-rollouts" type="number" min="1" max="10000" step="1" value="36" required></label>
+            </div>
+            <label for="robotics-search-criterion">Reward criterion<select id="robotics-search-criterion"><option value="task_failure">Task failure</option><option value="new_failure">New failure after baseline success</option></select></label>
+            <p class="hint">Repeated episode–variation pairs use cached results.</p>
+            <details class="robotics-options"><summary>Additional RL options</summary>
+              <div class="robotics-two-columns">
+                <label for="robotics-search-epsilon-start">Starting exploration (ε)<input id="robotics-search-epsilon-start" type="number" min="0" max="1" step="any" value="1" required></label>
+                <label for="robotics-search-epsilon-end">Final exploration (ε)<input id="robotics-search-epsilon-end" type="number" min="0" max="1" step="any" value="0.1" required></label>
+                <label for="robotics-search-learning-rate">Learning rate<input id="robotics-search-learning-rate" type="number" min="0.000001" max="0.1" step="any" value="0.002" required></label>
+                <label for="robotics-search-batch-size">Batch size<input id="robotics-search-batch-size" type="number" min="1" max="1024" step="1" value="16" required></label>
+                <label for="robotics-search-replay-capacity">Replay capacity<input id="robotics-search-replay-capacity" type="number" min="1" max="100000" step="1" value="4096" required></label>
+                <label for="robotics-search-seed">Search seed<input id="robotics-search-seed" type="number" min="0" max="2147482647" step="1" value="42" required></label>
+              </div>
+            </details>
+          </fieldset>
+          <p id="robotics-search-error" class="error" role="alert" hidden></p>
+          <button id="robotics-start-search" type="submit" class="primary">Start discovery</button>
+        </form>
+        <section id="robotics-search-progress" class="robotics-search-progress" aria-label="DQN training progress" hidden>
+          <dl><div><dt>RL steps</dt><dd id="robotics-search-steps">—</dd></div><div><dt>New rollouts</dt><dd id="robotics-search-model-calls">—</dd></div><div><dt>Cache hits</dt><dd id="robotics-search-cache-hits">—</dd></div><div><dt>Exploration ε</dt><dd id="robotics-search-epsilon">—</dd></div><div><dt>Loss</dt><dd id="robotics-search-loss">—</dd></div><div><dt>Updates</dt><dd id="robotics-search-updates">—</dd></div></dl>
+          <p id="robotics-search-current" class="hint"></p>
+        </section>
+        <figure id="robotics-live" class="robotics-live" hidden><img id="robotics-live-image" alt="Current Robosuite episode preview"><figcaption id="robotics-live-caption" class="hint"></figcaption></figure>
+        </div>
+        <div id="robotics-artifacts" class="robotics-artifacts"></div>
+      </div>
+    </section>
   </main>
 </body>
 </html>

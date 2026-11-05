@@ -15,10 +15,24 @@ renderSidebar();
 const titles = {classification:'Image classification', summarization:'Summarization', generation:'Image generation'};
 const labels = {rotation:'Rotation',darkness:'Darkness',saturation:'Saturation',style:'Style',lighting:'Lighting',detail:'Detail'};
 const modelPresets = {
-  classification:[{id:'google/mobilenet_v2_1.0_224',label:'MobileNetV2 · ImageNet'},{id:'microsoft/resnet-18',label:'ResNet18 · ImageNet'},
-    {id:'nateraw/vit-base-beans',label:'ViT · Beans'},{id:'aaraki/vit-base-patch16-224-in21k-finetuned-cifar10',label:'ViT · CIFAR-10'}],
-  summarization:[{id:'Falconsai/text_summarization',label:'T5 Small summarizer'},{id:'sshleifer/distilbart-cnn-12-6',label:'DistilBART CNN'}],
-  generation:[{id:'segmind/tiny-sd',label:'Tiny Stable Diffusion'},{id:'segmind/small-sd',label:'Small Stable Diffusion'}]
+  classification:[{id:'google/mobilenet_v2_1.0_224',label:'MobileNetV2 · ImageNet',group:'Dataset-trained classifiers'},
+    {id:'microsoft/resnet-18',label:'ResNet18 · ImageNet',group:'Dataset-trained classifiers'},
+    {id:'google/vit-base-patch16-224',label:'ViT Base · ImageNet',group:'Dataset-trained classifiers'},
+    {id:'nateraw/vit-base-beans',label:'ViT · Beans',group:'Dataset-trained classifiers'},
+    {id:'aaraki/vit-base-patch16-224-in21k-finetuned-cifar10',label:'ViT · CIFAR-10',group:'Dataset-trained classifiers'},
+    {id:'openai/clip-vit-base-patch32',label:'CLIP Base · supplied class names',group:'General-purpose · zero-shot',zeroShot:true},
+    {id:'openai/clip-vit-large-patch14',label:'CLIP Large · supplied class names',group:'General-purpose · zero-shot',zeroShot:true}],
+  summarization:[{id:'Falconsai/text_summarization',label:'T5 Small summarizer',group:'Task-trained summarizers'},
+    {id:'sshleifer/distilbart-cnn-12-6',label:'DistilBART · CNN/DailyMail',group:'Task-trained summarizers'},
+    {id:'Qwen/Qwen3-0.6B',label:'Qwen3 · 0.6B',group:'General-purpose instruction LMs'},
+    {id:'Qwen/Qwen3-1.7B',label:'Qwen3 · 1.7B',group:'General-purpose instruction LMs'},
+    {id:'Qwen/Qwen2.5-1.5B-Instruct',label:'Qwen2.5 Instruct · 1.5B',group:'General-purpose instruction LMs'},
+    {id:'HuggingFaceTB/SmolLM2-1.7B-Instruct',label:'SmolLM2 Instruct · 1.7B',group:'General-purpose instruction LMs'},
+    {id:'google/flan-t5-base',label:'FLAN-T5 Base',group:'General-purpose instruction LMs'}],
+  generation:[{id:'segmind/tiny-sd',label:'Tiny Stable Diffusion',group:'General-purpose image generators'},
+    {id:'segmind/small-sd',label:'Small Stable Diffusion',group:'General-purpose image generators'},
+    {id:'stable-diffusion-v1-5/stable-diffusion-v1-5',label:'Stable Diffusion 1.5',group:'General-purpose image generators'},
+    {id:'stabilityai/sd-turbo',label:'SD Turbo · fast',group:'General-purpose image generators',steps:4,size:512}]
 };
 const datasetPresets = [
   {id:'microsoft/cats_vs_dogs',label:'Cats and dogs',config:'default'},
@@ -41,6 +55,9 @@ const summaryInput={dataset:null,loading:false,options:null,optionsLoading:false
 const generationInput={dataset:null,loading:false,options:null,optionsLoading:false,optionsRequest:0,optionsTimer:null,
   splits:[],index:0,offset:0,items:[],pageRequest:0,pageLoading:false,sample:null,sampleRequest:0,sampleLoading:false};
 let catalog, task='classification', preview=null, busy=false;
+// Robotics owns its catalog and jobs. Keep the last legacy task intact so late
+// dataset callbacks and returning to that workspace preserve their context.
+let workspaceTask='classification', robotics=null, legacyInitialized=false;
 let previewRequest=0,previewTimer=null;
 let dataset=null, datasetLoading=false, imageIndex=0, imageOffset=0, imageItems=[];
 let pageRequest=0, pageLoading=false;
@@ -57,10 +74,12 @@ discovery=new DiscoveryController({api,explorer:embeddingExplorer,onChange:()=>u
   $('model-source').value='local';$('model-name').value=path;modelChoiceChanged();
   $('model-status').textContent='Saved checkpoint selected. Click Analyze to evaluate it.';
 }});
-embeddingExplorer.onReady=job=>{discovery.ready(job);showDatasetSample();};
+embeddingExplorer.onReady=job=>{
+  discovery.ready(job);
+  showDatasetSample();
+};
 embeddingExplorer.onInspectPair=(index,action)=>discovery.inspectPair(index,action);
 embeddingExplorer.isDiscoveryActive=()=>Boolean(discovery.active);
-
 function element(tag,text,className) {
   const el=document.createElement(tag);
   if(text!==undefined)el.textContent=text;
@@ -76,7 +95,17 @@ async function api(path,data) {
   return result;
 }
 function actionSpace() {
-  return Object.fromEntries(Object.entries(selections[task]).map(([key,group])=>[key,group.enabled?[...group.values]:[]]));
+  return Object.fromEntries(Object.entries(selections[task]).filter(([key,group])=>group.enabled||Object.hasOwn(catalog.tasks[task],key))
+    .map(([key,group])=>[key,group.enabled?[...group.values]:[]]));
+}
+function availableActions() {return catalog.action_catalog?.[task]||catalog.tasks[task];}
+function actionName(key) {
+  return catalog?.action_metadata?.[task]?.[key]?.label||labels[key]||key.replaceAll('_',' ').replace(/^./,letter=>letter.toUpperCase());
+}
+function actionGuidance(key) {
+  const metadata=catalog?.action_metadata?.[task]?.[key]||{};
+  const risk={meaning:'May change meaning',visibility:'May obscure content',structure:'May change structure'}[metadata.semantic_risk];
+  return [metadata.description,risk,metadata.risk_reason].filter(Boolean).join(' · ');
 }
 function actionCount() {
   const groups=Object.values(selections[task] || {});
@@ -84,18 +113,27 @@ function actionCount() {
   if(groups.some(group=>group.enabled && !group.values.length))return 0;
   return task==='summarization'?groups[0].values.length:groups.reduce((count,group)=>count*(group.enabled?group.values.length:1),1);
 }
+function actionSpaceError() {
+  const count=actionCount(),limit=catalog?.limits?.max_actions||5000;
+  if(!count)return 'Add at least one action to analyze.';
+  return count>limit?`${count.toLocaleString('en-US')} combinations exceed the ${limit.toLocaleString('en-US')} action limit. Choose fewer groups or values.`:'';
+}
 function usesSummaryDataset() {return task==='summarization'&&$('summary-source').value!=='text';}
 function usesGenerationDataset() {return task==='generation'&&$('generation-source').value!=='text';}
 function activeTextDataset() {return usesSummaryDataset()?summaryInput:usesGenerationDataset()?generationInput:null;}
 function updateControls() {
-  const count=actionCount();
+  if(workspaceTask==='robotics') {
+    document.querySelectorAll('.domain').forEach(button=>button.disabled=busy||datasetLoading||summaryInput.loading||generationInput.loading);
+    return;
+  }
+  const count=actionCount(),actionError=actionSpaceError();
   $('action-count').textContent=`${count} combination${count===1?'':'s'}${task==='classification'?' per image':task==='generation'?' per prompt':''}`;
-  $('action-error').textContent=count?'':'Add at least one action to analyze.';
-  show('action-error',!count);
+  $('action-error').textContent=actionError;
+  show('action-error',Boolean(actionError));
   const images=task==='classification',textDataset=activeTextDataset(),activeDataset=images?dataset:textDataset?.dataset;
   const inputReady=images||textDataset?Boolean(activeDataset):Boolean($('source-text').value.trim());
   const inputLoading=images?(datasetLoading||pageLoading):Boolean(textDataset&&(textDataset.loading||textDataset.pageLoading));
-  $('generate').disabled=busy||Boolean(discovery?.active)||inputLoading||!count||!inputReady||!selectedModel().name;
+  $('generate').disabled=busy||Boolean(discovery?.active)||inputLoading||Boolean(actionError)||!inputReady||!selectedModel().name;
   $('generate').textContent=busy?'Analyzing…':'Analyze';
   $('config-fields').disabled=busy||(images&&datasetLoading)||Boolean(textDataset?.loading);
   $('load-dataset').disabled=datasetLoading||busy||($('dataset-source').value==='huggingface'&&(!datasetOptions||datasetOptionsLoading||!selectedSplits.length));
@@ -120,26 +158,31 @@ function clearPreview() {
   updateControls();
 }
 function renderActions() {
-  if(!selections[task])selections[task]=Object.fromEntries(Object.entries(catalog.tasks[task]).map(([key,values])=>[key,{enabled:true,values:[...values]}]));
+  const defaults=catalog.tasks[task],options=availableActions();
+  if(!selections[task])selections[task]=Object.fromEntries(Object.entries(options).map(([key,values])=>[key,{enabled:Object.hasOwn(defaults,key),values:[...(defaults[key]||values)]}]));
   const editor=$('action-editor'),chips=$('action-chips'),add=$('action-add');editor.replaceChildren();chips.replaceChildren();
   const text=task==='summarization',groupKey='actions';
-  const keys=text?catalog.tasks[task][groupKey]:Object.keys(catalog.tasks[task]);
+  const keys=text?options[groupKey]:Object.keys(options);
   const active=key=>text?selections[task][groupKey].values.includes(key):selections[task][key].enabled;
-  const name=key=>text?key.replaceAll('_',' ').replace(/^./,letter=>letter.toUpperCase()):labels[key];
+  const name=actionName;
   const available=keys.filter(key=>!active(key));
   const placeholder=element('option',available.length?'＋ Add action…':'All actions added');placeholder.value='';
-  add.replaceChildren(placeholder,...available.map(key=>{const option=element('option',name(key));option.value=key;return option;}));
+  add.replaceChildren(placeholder,...available.map(key=>{
+    const risk={meaning:'may change meaning',visibility:'may obscure content',structure:'may change structure'}[catalog.action_metadata?.[task]?.[key]?.semantic_risk];
+    const option=element('option',`${name(key)}${risk?` · ${risk}`:''}`);option.value=key;option.title=actionGuidance(key);return option;
+  }));
   add.value='';add.disabled=!available.length;
   if(!keys.includes(editingAction)||!active(editingAction))editingAction=null;
   for(const key of keys) {
     if(!active(key))continue;
     const chip=element('div',undefined,'action-chip');
     const label=element(text?'span':'button',undefined,'action-chip-label');
+    label.title=actionGuidance(key);
     const caption=element('span',text?name(key):`${name(key)} (${selections[task][key].values.length})`);caption.id=`action-caption-${key}`;
     if(!text) {
       label.type='button';label.id=`edit-action-${key}`;label.title=`Edit ${name(key).toLowerCase()} values`;
       label.setAttribute('aria-expanded',String(editingAction===key));label.setAttribute('aria-controls','action-editor');
-      const symbol=element('span',({rotation:'↻',darkness:'◐',saturation:'◒',style:'◈',lighting:'☼',detail:'≋'})[key],'action-symbol');symbol.setAttribute('aria-hidden','true');
+      const symbol=element('span',({rotation:'↻',darkness:'◐',saturation:'◒',style:'◈',lighting:'☼',detail:'≋'})[key]||'◇','action-symbol');symbol.setAttribute('aria-hidden','true');
       label.append(symbol,caption);
       const arrow=element('span','⌄','action-chevron');arrow.setAttribute('aria-hidden','true');label.append(arrow);
       label.addEventListener('click',()=>{editingAction=editingAction===key?null:key;renderActions();$(`edit-action-${key}`).focus();});
@@ -155,18 +198,24 @@ function renderActions() {
     chip.append(label,remove);chips.append(chip);
   }
   if(editingAction) {
-    const key=editingAction,defaults=catalog.tasks[task][key],group=selections[task][key];
+    const key=editingAction,values=options[key],preset=defaults[key],group=selections[task][key],metadata=catalog.action_metadata?.[task]?.[key]||{};
     const label=element('label',`${name(key)} values`);label.setAttribute('for',`action-${key}`);
     const select=element('select');select.id=`action-${key}`;
-    const all=element('option',`All values (${defaults.length})`);all.value='all';select.append(all);
-    defaults.forEach((value,index)=>{const option=element('option',`${value}${key==='rotation'?'°':''}`);option.value=`value-${index}`;select.append(option);});
-    select.value=group.values.length===defaults.length?'all':`value-${defaults.indexOf(group.values[0])}`;
+    const equal=(a,b)=>a.length===b.length&&a.every((value,index)=>value===b[index]);
+    const hasPreset=preset&&!equal(preset,values);
+    if(hasPreset){const option=element('option',`Default values (${preset.length})`);option.value='defaults';select.append(option);}
+    const all=element('option',`All values (${values.length})`);all.value='all';select.append(all);
+    values.forEach((value,index)=>{const option=element('option',`${value}${key==='rotation'?'°':''}`);option.value=`value-${index}`;select.append(option);});
+    select.value=equal(group.values,values)?'all':hasPreset&&equal(group.values,preset)?'defaults':`value-${values.indexOf(group.values[0])}`;
     select.addEventListener('change',()=>{
-      group.values=select.value==='all'?[...defaults]:[defaults[Number(select.value.slice(6))]];
+      group.values=select.value==='all'?[...values]:select.value==='defaults'?[...preset]:[values[Number(select.value.slice(6))]];
       $(`action-caption-${key}`).textContent=`${name(key)} (${group.values.length})`;
       clearPreview();updateControls();
     });
     editor.append(label,select);
+    const range=Number.isFinite(metadata.minimum)&&Number.isFinite(metadata.maximum)?`Range: ${metadata.minimum}–${metadata.maximum}. Choose a listed value or set.`:'';
+    const guidance=[actionGuidance(key),range].filter(Boolean).join(' ');
+    if(guidance){const help=element('p',guidance,'hint action-guidance');help.id=`action-guidance-${key}`;select.setAttribute('aria-describedby',help.id);editor.append(help);}
   }
   editor.hidden=!editingAction;
   updateControls();
@@ -174,9 +223,9 @@ function renderActions() {
 $('action-add').addEventListener('change',()=>{
   const key=$('action-add').value;if(!key)return;
   if(task==='summarization') {
-    const group=selections[task].actions,defaults=catalog.tasks[task].actions;
-    if(!defaults.includes(key)||group.values.includes(key))return;
-    group.values=defaults.filter(value=>value===key||group.values.includes(value));group.enabled=true;
+    const group=selections[task].actions,options=availableActions().actions;
+    if(!options.includes(key)||group.values.includes(key))return;
+    group.values=options.filter(value=>value===key||group.values.includes(value));group.enabled=true;
   } else {
     const group=selections[task][key];if(!group||group.enabled)return;
     group.enabled=true;editingAction=key;
@@ -184,6 +233,23 @@ $('action-add').addEventListener('change',()=>{
   clearPreview();renderActions();(task==='summarization'?$(`remove-action-${key}`):$(`edit-action-${key}`)).focus();
 });
 function setTask(next) {
+  const returningFromRobotics=workspaceTask==='robotics';
+  workspaceTask=next;
+  show('workspace-layout',next!=='robotics');show('robotics-workspace',next==='robotics');
+  if(next==='robotics') {
+    $('domain-title').textContent='Robosuite';
+    $('workspace-description').textContent='Load a robot policy, measure task success, and explore environment variations.';
+    document.querySelectorAll('.domain').forEach(button=>{const selected=button.dataset.task==='robotics';button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false');});
+    if(!robotics)robotics=new RoboticsController({api,onChange:updateControls});
+    robotics.enter();updateControls();return;
+  }
+  if(robotics)robotics.leave();
+  if(returningFromRobotics&&next===task&&legacyInitialized) {
+    $('domain-title').textContent=titles[task];
+    $('workspace-description').textContent=task==='classification'?'Choose a model, load your images, and explore actions.':task==='summarization'?'Choose a model, load your articles, and explore summarization failures.':'Choose a model, load your prompts, and explore prompt combinations.';
+    document.querySelectorAll('.domain').forEach(button=>{const selected=button.dataset.task===task;button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false');});
+    updateControls();return;
+  }
   pageRequest++;pageLoading=false;
   summaryInput.pageRequest++;summaryInput.pageLoading=false;summaryInput.sampleRequest++;summaryInput.sampleLoading=false;
   generationInput.pageRequest++;generationInput.pageLoading=false;generationInput.sampleRequest++;generationInput.sampleLoading=false;
@@ -191,7 +257,7 @@ function setTask(next) {
   if(task!==next)$('model-name').value='';
   task=next;editingAction=null;
   $('domain-title').textContent=titles[task];
-  $('workspace-description').textContent=task==='classification'?'Choose a model, load your images, and explore actions.':task==='summarization'?'Choose a model, load your articles, and explore summarization failures.':'Choose a model, load your prompts, and explore style, lighting, and detail combinations.';
+  $('workspace-description').textContent=task==='classification'?'Choose a model, load your images, and explore actions.':task==='summarization'?'Choose a model, load your articles, and explore summarization failures.':'Choose a model, load your prompts, and explore prompt combinations.';
   $('viewer-title').textContent='Search space';
   document.querySelectorAll('.domain').forEach(button=>{const selected=button.dataset.task===task;button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false');});
   show('image-fields',task==='classification');show('summary-fields',task==='summarization');show('generation-fields',task==='generation');
@@ -200,47 +266,65 @@ function setTask(next) {
   $('source-text').value=textInputs[task] ?? (task==='generation'?catalog.prompt:catalog.text);
   $('source-text').required=task!=='classification'&&!activeTextDataset();
   $('source-help').textContent=task==='generation'?'Describe any scene. Analyze compares prompt combinations; Find failure generates images and reviews content, instructions, and visual defects.':'Analyze compares text edits; Find failure generates and evaluates summaries.';
-  $('action-help').textContent=task==='classification'?'':task==='generation'?'Combine Style, Lighting, and Detail values. Removed groups add no instruction to the original prompt.':'Text edits run separately.';
-  show('action-help',task!=='classification');
+  $('action-help').textContent=task==='classification'?'Enabled groups combine. Add optional actions to expand the search.':task==='generation'?'Enabled groups combine. Removed groups add no instruction to the original prompt.':'Text edits run separately. Some edits may change the source meaning.';
+  show('action-help',true);
   populatePresets('model-preset',modelPresets[task]);modelChoiceChanged();
   clearPreview();renderInputBrowser();
   if(usesSummaryDataset()&&summaryInput.dataset)loadSummarySample();
   if(usesGenerationDataset()&&generationInput.dataset)loadGenerationSample();
-  error('');renderActions();
+  error('');renderActions();legacyInitialized=true;
 }
 function populatePresets(id,choices) {
-  $(id).replaceChildren(...[...choices,{id:'other',label:'Other…'}].map(choice=>{const option=element('option',choice.label);option.value=choice.id;return option;}));
+  const nodes=[],groups=new Map();
+  for(const choice of choices){
+    const option=element('option',choice.label);option.value=choice.id;
+    if(choice.group){
+      if(!groups.has(choice.group)){const group=element('optgroup');group.label=choice.group;groups.set(choice.group,group);nodes.push(group);}
+      groups.get(choice.group).append(option);
+    }else nodes.push(option);
+  }
+  const other=element('option','Other…');other.value='other';nodes.push(other);
+  $(id).replaceChildren(...nodes);
   $(id).value=choices[0].id;
 }
 function selectedModel() {
   const source=$('model-source').value;
-  return {source,name:source==='huggingface'&&$('model-preset').value!=='other'?$('model-preset').value:$('model-name').value.trim()};
+  const model={source,name:source==='huggingface'&&$('model-preset').value!=='other'?$('model-preset').value:$('model-name').value.trim()};
+  if(task==='classification'&&!$('candidate-labels-field').hidden&&$('candidate-labels').value.trim())
+    model.candidate_labels=$('candidate-labels').value.split(/\n|,/).map(v=>v.trim()).filter(Boolean);
+  return model;
 }
 function modelChoiceChanged() {
   $('model-status').textContent='';clearPreview();
   const huggingface=$('model-source').value==='huggingface';
   const custom=huggingface&&$('model-preset').value==='other';
+  const choice=modelPresets[task].find(v=>v.id===$('model-preset').value);
+  show('candidate-labels-field',task==='classification'&&(choice?.zeroShot||custom||!huggingface));
+  if(task==='generation'){
+    $('discovery-steps').value=String(choice?.steps||12);$('discovery-size').value=String(choice?.size||256);
+  }
   show('hf-model-fields',huggingface);show('model-name-fields',!huggingface||custom);
   $('model-label').textContent=huggingface?'Hugging Face model ID':'Local model directory';
   $('model-name').placeholder=huggingface?`e.g. ${modelPresets[task][0].id}`:task==='generation'?'/path/to/stable-diffusion-pipeline':'/path/to/saved-huggingface-model';
   $('model-name').required=custom||!huggingface;
   const help={
     classification:huggingface?'Runs locally · downloads on first use.':'Choose a saved Hugging Face model directory with pretrained weights and image processor configuration.',
-    summarization:huggingface?'Uses the selected encoder-decoder model’s summarization encoder. Required model and tokenizer files download on first use.':'Choose a saved encoder-decoder model directory with pretrained weights and tokenizer. Uses its summarization encoder.',
+    summarization:'Seq2seq or instruction LM · runs locally · downloads on first use.',
     generation:huggingface?'Stable Diffusion 1/2 pipelines use their CLIP text encoder. Only the required conditioning files download; cached files are reused. SDXL and FLUX are unsupported.':'Choose a Diffusers Stable Diffusion 1/2 pipeline directory with its tokenizer and CLIP text encoder. SDXL and FLUX are unsupported.'
   };
   $('model-help').textContent=help[task];
+  if(task==='classification'&&choice?.zeroShot)$('model-help').textContent='Zero-shot · uses dataset class names or the classes below. Scores depend on the candidate list.';
   updateDatasetModelChoice();
   updateControls();
 }
+$('candidate-labels').addEventListener('change',()=>{clearPreview();updateControls();});
 function modelSourceChanged() {
   $('model-name').value='';modelChoiceChanged();
 }
 function actionDescription(action) {
   if(!action)return 'Original input.';
-  if('rotation' in action)return `Rotation: ${action.rotation}° · Darkness: ${action.darkness} · Saturation: ${action.saturation}`;
-  if(action.name)return action.name.replaceAll('_',' ');
-  return Object.entries(action).filter(([key,value])=>key!=='id'&&value!==null&&value!==undefined).map(([key,value])=>`${labels[key]||key}: ${value}`).join(' · ');
+  if(action.name)return catalog?.action_metadata?.[task]?.[action.name]?.label||action.name.replaceAll('_',' ');
+  return Object.entries(action).filter(([key,value])=>key!=='id'&&value!==null&&value!==undefined).map(([key,value])=>`${actionName(key)}: ${value}${key==='rotation'?'°':''}`).join(' · ');
 }
 function displayInput(container,input) {
   const el=input.image?element('img'):element('pre',input.text);
@@ -281,9 +365,9 @@ function inspectEmbedding(original,node,config) {
   show('original-reference',Boolean(reference));$('original-reference-text').textContent=reference||'';
   displayRequirements('original-requirements',config.task==='generation'?original.checks||[]:[]);
   $('selected-title').textContent=node?(config.task==='generation'?`Action ${node.id}`:`Combination ${node.id+1}`):'Original input';
-  const description=node&&config.task==='classification'?Object.entries({rotation:'Rotation',darkness:'Darkness',saturation:'Saturation'}).map(([key,label])=>{
+  const description=node&&config.task==='classification'?Object.keys({...catalog.tasks.classification,...node.action}).filter(key=>key!=='id').map(key=>{
     const value=config.action_space?.[key]?.length===0?'Off':`${node.action[key]}${key==='rotation'?'°':''}`;
-    return `${label}: ${value}`;
+    return `${actionName(key)}: ${value}`;
   }).join('\n'):actionDescription(node?.action);
   $('selected-action').textContent=description+(node?.unchanged?' — This edit did not change this input.':'');
   $('embedding-similarity').textContent=node?`Cosine similarity to original: ${node.similarity.toFixed(3)}`:'';
@@ -305,7 +389,7 @@ async function pollPreview(id,request) {
   } catch(e){if(request!==previewRequest)return;busy=false;updateControls();error(e.message);$('preview-status').textContent='Connection interrupted. Click Analyze to try again.';}
 }
 $('preview-form').addEventListener('submit',async event=>{
-  event.preventDefault();error('');if(busy||discovery.active||!actionCount()||(task==='classification'&&(datasetLoading||pageLoading||!dataset)))return;
+  event.preventDefault();error('');if(busy||discovery.active||actionSpaceError()||(task==='classification'&&(datasetLoading||pageLoading||!dataset))){updateControls();return;}
   const textDataset=activeTextDataset();
   if(textDataset&&(textDataset.loading||textDataset.pageLoading||!textDataset.dataset))return;
   const model=selectedModel();
@@ -778,5 +862,6 @@ $('load-generation-dataset').addEventListener('click',async()=>{
   catalog=await api('/api/catalog');$('summary-source').value='dataset';$('generation-source').value='dataset';
   populatePresets('generation-dataset-preset',generationDatasetPresets);generationDatasetPresetChanged();
   populatePresets('summary-dataset-preset',summaryDatasetPresets);summaryDatasetPresetChanged();
-  populatePresets('dataset-preset',datasetPresets);datasetPresetChanged();setTask('classification');
+  populatePresets('dataset-preset',datasetPresets);datasetPresetChanged();
+  const restoreRobotics=workspaceTask==='robotics';setTask('classification');if(restoreRobotics)setTask('robotics');
 }catch(e){error(`Could not load the local server: ${e.message}`);}})();

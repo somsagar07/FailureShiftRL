@@ -1,10 +1,13 @@
 # FailureShift
 
-A local workspace for image classification, summarization, and image generation.
+A local workspace for image classification, summarization, image generation,
+and Robosuite policy evaluation. In the first three domains,
 **Analyze** displays the selected model's embeddings in 3D. **Find failure** runs a
 DQN search, evaluates model outputs, and colors measured regions
 of the graph. **Adapt** selects action combinations across training inputs and
 fine-tunes a separate model checkpoint with explicit targets.
+Robosuite evaluates an existing policy in simulation with controlled environment
+variations, paired starting states, and recorded rollouts.
 
 ## Run
 
@@ -82,6 +85,219 @@ Open `http://127.0.0.1:8000` on your laptop. Match the local and remote port if
 changing it; the server validates the browser Host header. The service listens
 only on the server's loopback interface.
 
+## Model choices for discovery
+
+The model dropdown groups **general-purpose** models separately from
+**dataset-trained classifiers** and **task-trained summarizers**. All use existing
+pretrained weights; no project-specific training is required to Analyze or Find
+failure. Hugging Face selections download the required files on first use.
+
+- Classification: CLIP Base/Large can classify against candidate class names.
+  Names come from dataset label metadata automatically, or from **Candidate
+  classes** (comma/newline separated). Include the whole relevant class set;
+  scores change when that set changes. CLIP features are its projected image
+  features. MobileNet, ResNet, ViT, Beans and CIFAR classifiers use their fixed
+  pretrained label vocabularies; ImageNet training does not make their heads
+  compatible with arbitrary dataset IDs. Local folders alone do not supply
+  reviewed labels; provide labels separately.
+- Summarization: Qwen3 0.6B/1.7B, Qwen2.5 Instruct, SmolLM2 Instruct and FLAN-T5
+  are general instruction choices. T5 Small and DistilBART are task-trained
+  alternatives. Causal instruction models use a summarization prompt, reserve
+  room for generated output and return only completion tokens. Analyze uses
+  the selected model's final source-token states. Dataset references and the
+  existing ROUGE/NLI review criteria still apply.
+- Generation: Tiny/Small Stable Diffusion, SD 1.5 and SD Turbo use the existing
+  SD1/2 pipeline adapter. Turbo selects four steps at 512 pixels in the UI and
+  disables classifier-free guidance. Only CLIP conditioning files are loaded
+  for Analyze; Find failure loads the generator and visual evaluator. SDXL,
+  SD3, FLUX and custom remote-code pipelines remain unsupported.
+
+New causal-LM and zero-shot CLIP support covers discovery. Their Adapt path is
+not enabled yet. General capability does not guarantee correctness: the existing
+failure criteria are automated review signals. LAYA's primary release handles
+text decisions, and the separate community LAYA-Vision extension needs a custom
+adapter; neither is advertised as a supported image classifier here.
+
+## Robosuite workspace
+
+The optional robotics runtime is installed separately from the app and Vev. It
+shares Torch/CUDA without changing their packages. On a new machine, run from
+`web_interface` (Python 3.12 or newer):
+
+```bash
+.venv/bin/python -E setup_robotics.py --render
+.venv/bin/python -E server.py --port 8000
+```
+
+`setup_robotics.py --check --render` checks installed dependencies and runs a real
+headless Lift/Panda episode fragment. No policy weights are downloaded during
+setup. EGL rendering still requires a working graphics driver, even when policy
+inference uses CPU. The runtime and temporary installation directories are ignored
+by Git. The setup pins are in `requirements-robotics.txt`.
+
+1. Choose **Robosuite** in Workspace, then the task, robot, and controller.
+   **Load environment** resets the simulator and shows its scene, cameras,
+   observation shapes, and action dimensions. No policy is needed for this preview.
+2. Choose a locally trained **Starter policy** to fill its task, controller,
+   checkpoint, and observation mapping. Its measured held-out success count is
+   shown beside the selection. **Refresh** picks up newly finished training runs.
+   Alternatively, select a policy format and its server file/folder, or upload from your browser.
+   LeRobot also accepts a Hugging Face repository and revision. Folder uploads
+   send relative files in 8 MiB chunks; large files are not loaded into server RAM.
+3. For a policy without native Robosuite observation metadata, set the observation
+   mapping under **Observation and action mapping**, and enter the task instruction. State ordering,
+   camera names, action units, and controller semantics must match training.
+4. Select environment variations. The defaults are contact friction, object mass,
+   and object X position. Add/remove groups and select their values; ten groups
+   are available.
+5. **Analyze** runs baseline episodes and saves their initial simulation states.
+   Each graph point represents an episode's pooled policy features, projected into
+   a fixed PCA basis fitted from baseline decisions. Select an episode to expand
+   its variations. Untested children have dashed boundaries and a pending layout;
+   evaluated children use their measured features in the same PCA basis.
+   The saved reset includes the robot controller's initial references as well as
+   physics and task state. Policy and processor state reset before each episode. Changing settings
+   requires another Analyze run.
+6. **Find failure** opens DQN controls. Set **RL steps**, **New rollout budget**, and
+   **Reward criterion**, then press **Start discovery**. Additional options expose
+   exploration, learning rate, batch size, replay capacity, and search seed.
+   A separate terminal DQN learns which variations fail from each baseline episode's
+   full feature vector. The tested robot policy stays fixed. New pairs run from the
+   saved initial states; repeated pairs and neutral conditions reuse measured results.
+   After the rollout budget is used, remaining RL steps train from valid cached pairs.
+   Live counters distinguish steps, new simulator calls, cache hits, and optimizer updates.
+7. Select graph nodes to compare outcomes, paired new failures/recoveries, and
+   baseline/variation replays. Reports open in a new tab. Cancel preserves partial
+   results. Inference and simulation run on the server, including over SSH.
+   Loading another environment preview preserves the last evaluation;
+   **Show last evaluation** returns to its graph. Edited settings require a fresh
+   Analyze before testing variations.
+
+| Format | Input | Compatibility |
+| --- | --- | --- |
+| Robomimic | Native `.pth` checkpoint | Native observation preprocessing and normalization; task/robot/controller metadata checked. The installed adapter targets stable Robomimic 0.3 checkpoints; unsupported newer architectures or action encodings produce an error. |
+| TorchScript | Exported `.pt` policy | One action tensor per call; explicit state order or dictionary schema. Recurrent/chunk state must be handled in exported `select_action` / `reset` methods. |
+| Stable-Baselines3 | Native `.zip` checkpoint | Select the matching PPO/A2C/SAC/TD3/DDPG algorithm. Normalization statistics must accompany policies that used VecNormalize, or be supplied explicitly. |
+| LeRobot / VLA | Pretrained folder or HF repository | Uses the installed native policy, saved preprocessor/postprocessor, instruction tokenizer, normalization, and action queue. ACT, Diffusion, SmolVLA, PI0, and PI05 imports are checked. A compatible trained embodiment and action mapping are required. |
+
+An example LeRobot observation mapping is:
+
+```json
+{
+  "observation_map": {"observation.images.front": "agentview_image"},
+  "state_keys": ["robot0_joint_pos", "robot0_gripper_qpos"]
+}
+```
+
+This is an example of mapping syntax, **not a universal state definition**. Use
+the exact inputs and order the policy was trained with. A VLA that predicts joint
+positions cannot be used as Cartesian delta commands merely because its action
+vector has the same length. Choose the trained controller and supply any explicit
+index, scale, and offset mapping. Saved processors handle native normalization.
+Missing cameras, incompatible shapes, nonfinite values, and out-of-range commands
+raise errors before being scored as policy failures. Use checkpoints you trust;
+uploaded custom Python modules are not executed.
+
+Task success comes from Robosuite's actual task criterion. The default DQN reward
+is 1 for task failure and 0 for success; **New failure after baseline success** only
+rewards failures whose matched baseline succeeded. Errors are excluded from reward
+learning and measured rates. Observed colors leave untested pairs gray. The optional
+**DQN expected reward** view estimates every action after at least one optimizer
+update. The graph switches to this view automatically when learned estimates become
+available; an explicit choice of observed colors is preserved during polling.
+Original episode colors average Q values across all actions, and expanded children
+use their individual Q values, including untested actions. These estimates are not
+measured outcomes or calibrated probabilities. Inspect shows the selected Q value;
+pending positions and missing replays still require actual simulation.
+Children are larger when DQN action preference varies less across baseline episodes;
+a purple dashed boundary means that variation cannot be measured. Robotics adaptation
+is not implemented. Legacy API discovery requests without `search` still run the
+paired sweep. Lighting/camera changes require a camera-based policy,
+and object changes require applicable task objects. The current variation presets
+are not guaranteed valid for every custom task.
+
+Known native policy adapters capture hidden features during existing inference,
+without extra decisions or advancing action queues. The bundled TorchScript starters
+use their verified 128-dimensional hidden representation. Unsupported architectures
+use explicitly labeled observation features. No graph coordinate is claimed to be
+a unique state or an invertible representation. Existing analyses created before
+episode features were added need a fresh Analyze run for DQN discovery.
+
+Runs live under `runs/robotics/`: compact snapshots, bounded feature samples, reports,
+one final frame per measured episode, and at most the first episode plus first
+observed failure video per condition. DQN runs retain a checkpoint, step history,
+and a float32 prediction matrix; polling fetches one selected episode's estimates.
+Uploaded policies live
+in its `policies/` directory. A server path avoids copying existing checkpoints.
+Deleting a completed run folder removes its saved results; keep the Analyze run
+while you still need its matched-state discovery or referenced baseline replays.
+
+### Locally trained starter policies
+
+The starter trainer supports **Lift**, **Stack**, and **PickPlaceCan**, using Panda
+and OSC_POSE at 20 Hz. To reproduce training on this machine:
+
+```bash
+.venv/bin/python -E train_starter_policies.py --tasks Lift Stack PickPlaceCan
+```
+
+It collects state/action demonstrations in the simulator, fits a small neural
+policy, and optionally adds DAgger labels from its own rollouts. Exported policies
+use learned translation/gripper commands, embedded normalization, and a resettable
+episode clock. They do not call the demonstrator during inference. These are state
+policies for trying the workspace; they are not image or language-conditioned VLAs.
+
+Only the best development checkpoint for each task is saved as
+`runs/robotics/starter-policies/<task>/best.pt`. Training, development, and final
+evaluation use disjoint seeds. Each task also has `metrics.json` with full trial
+results and `training-config.json` with reproduction settings. The catalog lists
+only completed evaluations. Checkpoint selection uses development rollouts, not
+final test results. A high success rate on these small tests does not establish
+robustness to arbitrary variations.
+
+Only compact weights and metrics are retained; demonstrations stay in memory.
+No image datasets or external policy weights are downloaded. Re-running a task
+replaces its saved starter after final evaluation; a checkpoint digest ties the
+catalog's scores to the evaluated weights. Use `--output /another/directory` to
+keep a separate experiment. The workspace reads its default catalog under
+`runs/robotics/starter-policies/`.
+
+Local training on 2026-11-01 retained these checkpoints:
+
+| Task | Held-out nominal successes | Variation successes | Checkpoint |
+| --- | --- | --- | --- |
+| Lift | 20 / 20 | 40 / 40 | `lift/best.pt` |
+| Stack | 20 / 20 | 40 / 40 | `stack/best.pt` |
+| PickPlaceCan | 20 / 20 | 40 / 40 | `pickplacecan/best.pt` |
+
+Paths are relative to `runs/robotics/starter-policies/`. Each variation test used
+10 episodes at mass ×1.5, friction ×0.6, object X offset +0.03 m, and one control
+step of action delay. Friction ×0.6 is an extra scripted probe; the UI presets are
+×0.5, ×1, and ×1.5. Nominal final seeds were 2000–2019, and variation seeds were
+2000–2009. Development used 1000–1009; these seeds were excluded from training.
+Stack's three candidates each succeeded on 9/10 development trials; the predefined
+return tiebreaker retained its initial behavior-cloning policy. The other two
+tasks stopped after 10/10 development successes. All three saved policies are
+learned networks, totaling about 279 KiB. These are small simulator evaluations,
+not estimates of general robot reliability.
+
+For local engineering verification:
+
+```bash
+.venv/bin/python -E -m unittest discover -s tests -p 'test_robotics*.py'
+.venv/bin/python -E -m unittest discover -s tests -p 'test_starter_training.py'
+.venv/bin/python -E tests/robotics_smoke.py
+.venv/bin/python -E tests/robotics_reset_case.py
+```
+
+The simulation smoke checks real state restoration, interventions, subprocess
+rollouts, and JPEG/MP4 artifacts with a small untrained TorchScript policy. It
+tests integration, not task performance or VLA quality. A supplied trained policy
+still needs task-specific evaluation.
+
+See [Robotics policy checkpoints](ROBOTICS_POLICIES.md) for exact mapping,
+normalization, processor, and checkpoint compatibility requirements.
+
 ## Use
 
 1. Select a domain in **Workspace**.
@@ -94,11 +310,11 @@ only on the server's loopback interface.
    with source text and reference summaries, or **Paste text** for one article.
    Image generation accepts a prompt dataset or one freely written prompt.
 4. Active actions appear as chips, such as **Darkness (5)**. Click **×** to remove
-   one, or use **Add action** to bring it back. Click a chip's name to choose all
+   one, or use **Add action** to bring it back or add an optional transformation. Click a chip's name to choose all
    fixed values or one value; removing and re-adding it keeps that choice.
    Summarization has a chip for each text edit. Generation groups values under
    **Style (5)**, **Lighting (5)**, and **Detail (5)**, with 125 combinations per prompt.
-   **Restore all actions** resets the defaults.
+   **Restore defaults** resets the original selections. Optional actions stay off until added.
 5. Choose an **Analyze device**: **Automatic** uses CUDA when available, and
    **CPU** or **CUDA GPU** selects it explicitly. Click **Analyze**. For classification,
    the **Search space** graph shows the model embeddings. Once the original
@@ -120,7 +336,7 @@ only on the server's loopback interface.
 For a short classification demo, choose **Hugging Face → MobileNetV2** and
 **Hugging Face dataset → Cats and dogs**, enter `20` in **Rows**, click **Load input data**, then
 **Analyze**. The overview has one point per image. Selecting one image expands
-its 125 action nodes when all actions are enabled.
+its 125 action nodes with the default actions enabled.
 Leaving **Rows** blank loads the full selected splits.
 Presets download model weights on first use. Full dataset loads use the Hugging Face
 cache; row-limited loads stream and retain only the selected rows for this server session.
@@ -503,14 +719,47 @@ selected summarizer. The grounded mode also downloads
 [cross-encoder/nli-MiniLM2-L6-H768](https://huggingface.co/cross-encoder/nli-MiniLM2-L6-H768)
 to estimate support for each generated sentence in overlapping windows of the
 actually evaluated input. It does not silently fall back when that scorer is
-unavailable. Reference quality is `ROUGE-L F1 × distinct-bigram ratio`; grounded
-quality is the geometric mean of reference quality and source support. Empty
+unavailable. The inspector retains each assessed claim, its strongest source window,
+and a diagnostic comparison with whitespace-collapsed source text. A support change
+above 0.20, changed lexical window boundaries, or incomplete coverage marks the NLI
+assessment unstable or incomplete. Stability is not factuality: wrong-speaker claims
+can still receive high, stable NLI support.
+
+Reference quality is `ROUGE-L F1 × distinct-bigram ratio`; reliable grounded
+quality is the geometric mean of reference quality and source support. If either
+the original or edited assessment fails these consistency/coverage checks, both
+sides of the reward use reference quality and the result is marked inconclusive.
+The raw NLI measurements remain available for inspection. Empty
 summaries score zero. Reward is `0.5(1−quality) + 0.5 max(0, baseline_quality−quality)`;
 severity is `1−quality`. Quality below 0.5 or a drop above the chosen threshold is
 flagged for review. Reference overlap penalizes valid paraphrases, NLI can miss
 unsupported claims, and edits that change facts can legitimately change a summary.
 Inspect the source, reference and generated output before treating a flag as a
 failure or selecting it for training.
+
+Discovery reports include an evidence status for each evaluated pair:
+
+- **Failure:** a provided-label mismatch under the tested label-preservation
+  assumption, or an observed empty summary. Existing baseline errors are distinguished
+  from errors introduced by an action.
+- **Candidate:** an automatic judge, reference-overlap metric, prediction change,
+  or literal-number check raises a review signal.
+- **No flag:** the evaluated checks raised no flag; this does not establish correctness.
+- **Inconclusive:** input validity, truncation, or unstable/incomplete grounding
+  prevents a clear interpretation.
+
+Action guidance identifies edits that can change meaning or hide labelled content.
+Text checks also identify changed numeric literals or negation markers—for example,
+punctuation removal turning `5-8` into `58`. These are review guards, not proofs
+that all remaining actions preserve semantics. If the summarizer truncates an article,
+source support uses the visible input and the incomplete-reference comparison is flagged.
+
+The summary counts distinct measured input/action pairs and baseline inputs. Repeated
+DQN visits reuse the same measurement and seed; they do not add independent evidence.
+Search-selected counts do not estimate dataset-wide prevalence. Predicted graph colors
+remain expected rewards, while measured colors are evaluator severity. Vev rating
+distributions are retained in the report and inspector; they are not calibrated
+failure probabilities. Unconfigured bias comparisons remain explicitly unevaluated.
 
 **Generation.** Find failure runs one combined reward with the independent
 [Vev-4B](https://huggingface.co/CountingSheep/vev-4b) visual evaluator by default.
@@ -693,6 +942,16 @@ discovery clears the selection.
   from training while preserving the uploaded JSON for later selections.
   Images must be at most 20 MB and
   20 megapixels. Failed generated outputs are never automatically used as targets.
+  Training honors the photo's EXIF display orientation and preserves its full scene
+  by default. Dimensions are rounded to multiples of eight, so the original aspect
+  ratio is approximate. Mixed portrait and landscape targets can share an effective
+  batch without cropping or padding. Check that each reference depicts both the
+  caption and the selected style, lighting and detail settings; an ordinary photo
+  is not automatically a valid target for a different requested style.
+  **Adapt → Additional options → Training resolution** defaults to the model's
+  native resolution (512 for Tiny Stable Diffusion), independently of discovery's
+  preview size. An explicit size overrides this default. **Target framing → Center
+  crop** restores square cropping when intentionally requested; review its edges.
   Training updates UNet LoRA, saves the adapter, and saves a fused standalone pipeline.
 
 The panel shows examples per epoch and total example exposure before starting.
@@ -704,6 +963,9 @@ limit does not restrict the expanded image/action dataset.
 
 Set epochs and learning rate, then press **Start fine-tuning**. Opening Adapt never
 starts training. A missing target or invalid setting is explained beside the button.
+Default learning rates are `0.001` for classification, `0.00002` for summarization,
+and `0.0001` for generation, consistently in the UI and backend. Explicit values
+override these defaults; they are starting points, not guarantees of improvement.
 Expand **Additional options** for device, effective batch size, training seed,
 weight decay, gradient clipping, and working-data cleanup. Training has its own
 seed, independent of discovery. Weight decay defaults to `0.01`; the maximum
@@ -732,6 +994,7 @@ model weights and optimizer state cannot fit.
 Progress and loss describe training examples. **Open adaptation report** opens a
 new tab with the selected action definitions, observed evidence, input and example
 counts, targets, settings, and checkpoint path under `adaptation_selection`.
+Generation reports also record the effective target resolution and framing policy.
 Job status and saved reports include the actual training device and its name;
 `settings.device` records the requested `auto`, `cpu`, or `cuda` selection.
 `settings.batch_size` records the requested automatic or manual effective batch;
@@ -740,6 +1003,42 @@ Adapt reports store the base targets and a compact training plan, instead of
 duplicating one record per transformed example.
 Use **Select checkpoint for Analyze** and evaluate on separate held-out inputs to
 check whether failures have been reduced.
+When choosing epochs or learning rates, use a validation set distinct from the
+final test inputs. Compare the same original/action pairs and generation seeds
+against the base model, including clean inputs and actions outside the training
+selection. Lower training loss alone does not establish reduced failure severity;
+retain the original model if the candidate does not meet your validation criteria.
+
+For image generation, optional **Validation prompts** run a paired comparison as
+part of Adapt. Enter unseen original scene prompts, one per line (1–64); use at
+least 8 for an improvement verdict. The backend rejects normalized duplicates and
+overlap with training scenes or effective captions. It evaluates clean prompts and
+the selected actions with matching generation settings, seeds, and scorer revisions,
+first with the base model and then with the separately loaded saved checkpoint.
+Validation uses discovery's rendering resolution and inference steps, while training
+uses its own resolution. The API also accepts optional per-prompt `checks` in
+`validation_data` and 1–4 `validation_repeats`; the requirement-check metric needs
+checks for every validation prompt. Each panel is limited to 4,096 generated images.
+
+The report shows selected-action and clean severity changes, component scores,
+failure flags, and paired 95% bootstrap intervals over distinct prompts. `improved`
+requires at least a .01 reduction in selected mean severity, an interval wholly
+below zero, no increase in selected failure rate, and no more than .01 deterioration
+in clean or overall mean severity. A statistically supported deterioration of more
+than .01 produces `regressed`; other outcomes are `inconclusive`. These are automated
+review signals, not calibrated quality probabilities. Repeated seeds and actions
+are not independent prompts; intervals also hold any shared bias probe suite fixed.
+Use separate untouched data for final testing and inspect actions outside the
+training selection separately.
+
+Validation previews are available from the adaptation report. Each before/after
+panel retains at most 64 previews within 32 MiB, in generation order; every score
+is retained, and discarded previews have no image link. Selection of previews is
+independent of scores. Cancelled or failed
+validation retains an already saved candidate checkpoint and its partial report.
+No candidate activates automatically. Completed inconclusive or regressed candidates
+can still be explicitly selected for inspection; omitted validation reports
+`not_requested` and makes no claim of output improvement.
 
 **Clear temporary data after training** is enabled by default. After the checkpoint
 and report are saved successfully, it releases the associated feature storage and
@@ -831,21 +1130,40 @@ budget; very wide feature models can still exceed it and report an error.
 No dataset rows are silently sampled. Covariance PCA can lose precision on nearly
 degenerate axes; numerically unresolved axes are suppressed.
 
-## Fixed action space
+## Default and optional actions
 
 | Domain | Default combinations | What Analyze previews |
 | --- | --- | --- |
 | Image classification | 125 per image: 5 rotations × 5 darkening values × 5 saturation factors | An altered image |
-| Summarization | 14 available named text edits | Edited source text; discovery adds actual summaries |
+| Summarization | 14 enabled named text edits | Edited source text; discovery adds actual summaries |
 | Image generation | 125 per prompt: 5 styles × 5 lighting settings × 5 detail levels | Transformed prompts; discovery adds generated images and visual-check results |
 
 Classification values match the repository's experiment configuration. Generation
 uses presentation actions; explicitly saved style-only and template spaces remain readable.
-The interface supports removing and restoring fixed values.
+The defaults and their action IDs are preserved. **Add action** exposes 19 image
+controls, 28 text edits, and 9 generation groups in total:
+
+- Images add brightness, contrast, sharpness, blur, deterministic noise, JPEG
+  compression, pixelation, hue shifts, grayscale, inversion, posterization,
+  solarization, translation, zoom, and horizontal flipping.
+- Text adds case and whitespace variations, contraction expansion/reduction,
+  quote styles, sentence formatting, sentence reordering/duplication/removal,
+  and nonbreaking spaces.
+- Generation adds composition, viewpoint, framing, color palette, focus, and texture.
+  These instructions can conflict with a prompt's existing constraints; inspect the
+  enabled settings and judge evidence.
+
+The interface supports removing and restoring fixed values. New axes multiply
+the Cartesian space; text edits remain separate actions. The browser shows the count
+and blocks more than 5,000 combinations per input before analysis. The backend applies
+the same guard without materializing an oversized product. Reduce enabled groups or
+select individual values to fit the budget; nothing is silently sampled.
 Turning a classification transformation off leaves that property unchanged.
 Every combination starts from the original
 input. Images are resized to 224 × 224, matching the experiment, and transformations
 are applied in the order rotation → saturation → darkening.
+Optional image transformations then follow the catalog's fixed order. Random image
+noise is deterministic for the same input and action, including previews and discovery.
 
 Text edits are bounded adaptations of the original named functions. NLTK/Pattern
 tokenization is not reproduced exactly. Noun inflection and the unfinished
@@ -868,12 +1186,7 @@ All are excluded from Git. After a server restart, load your input and click Ana
 
 ```bash
 .venv/bin/python -E -m unittest discover -s tests -v
-node tests/test_ui.cjs
-node tests/test_embedding_view.cjs
-node tests/test_embedding_controller.cjs
-node tests/test_discovery_controller.cjs
-node tests/test_adaptation_controller.cjs
-node tests/test_embedding_live.cjs
+node --test tests/*.cjs
 ```
 
 The Python suite covers data loading, transformations, model adapters, CPU/CUDA

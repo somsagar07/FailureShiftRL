@@ -41,6 +41,13 @@ def _selection(model, task='classification'):
     elif not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)?', name) or '..' in name:
         raise ValueError('Use a Hugging Face model ID, for example google/vit-base-patch16-224.')
     selection = {'source': model['source'], 'name': name, 'task': task}
+    if model.get('candidate_labels') is not None:
+        labels = model['candidate_labels']
+        if (task != 'classification' or not isinstance(labels, list) or not 2 <= len(labels) <= 1000
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 512 for v in labels)
+                or len({v.strip().casefold() for v in labels}) != len(labels)):
+            raise ValueError('Zero-shot classification needs 2–1,000 distinct class names.')
+        selection['candidate_labels'] = [v.strip() for v in labels]
     revision = model.get('revision')
     if revision is not None:
         if not isinstance(revision, str) or not revision.strip() or len(revision) > 256:
@@ -53,6 +60,8 @@ def _model_key(model):
     # A checkpoint's identity is independent of the execution device and timings.
     identity = {name: model[name] for name in ('source', 'name', 'revision') if model.get(name) is not None}
     identity['task'] = model.get('task', 'classification')
+    if 'candidate_labels' in model:
+        identity['candidate_labels'] = model['candidate_labels']
     if model['source'] == 'local':
         root = Path(model['name'])
         # A replaced checkpoint/processor at the same path must not reuse features.
@@ -96,6 +105,12 @@ class HuggingFaceEncoder:
             raise ValueError(f'Could not load image model {selection["name"]}: {exc}') from exc
         self.revision = getattr(self.model.config, '_commit_hash', None)
         self.class_labels = dict(getattr(self.model.config, 'id2label', {}) or {})
+        self.is_clip = getattr(self.model.config, 'model_type', None) == 'clip'
+        if self.is_clip:
+            labels = selection.get('candidate_labels')
+            if not labels:
+                raise ValueError('CLIP needs class names. Use a labelled dataset or enter candidate classes before Analyze.')
+            self.class_labels = dict(enumerate(labels))
         self.feature_method = None
 
     def set_device(self, device):
@@ -106,6 +121,10 @@ class HuggingFaceEncoder:
 
     def share_classifier(self, evaluator):
         """Use the validated classifier's identical base on the same device."""
+        if self.is_clip:
+            if evaluator.device == self.device and getattr(evaluator, 'is_clip', False):
+                self.model = evaluator.model
+            return
         if evaluator.device != self.device:
             return
         base = evaluator.model.base_model
@@ -128,6 +147,12 @@ class HuggingFaceEncoder:
                 raise ValueError('The selected processor does not produce image pixel_values.')
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
             with torch.inference_mode():
+                if self.is_clip:
+                    features = self.model.get_image_features(**inputs)
+                    if not torch.isfinite(features).all():
+                        raise ValueError('CLIP returned nonfinite image features.')
+                    self.feature_method = 'CLIP projected image features'
+                    return features.detach().to(dtype=torch.float32, device='cpu').numpy()
                 output = self.model(**inputs, return_dict=True)
                 features = None if self._skip_pooler else getattr(output, 'pooler_output', None)
                 if features is not None:
@@ -486,6 +511,14 @@ class EmbeddingManager:
             raise ValueError('Generate the input preview before computing embeddings.')
         model = _selection(preview['config']['model'], task)
         dataset = self.previews.datasets.ready(preview['config']['dataset_id']) if preview['config'].get('dataset_id') else None
+        if task == 'classification' and dataset and not model.get('candidate_labels'):
+            labels = self.previews.datasets.labels(dataset['id'])
+            candidates = labels.get('class_names') or sorted(set(labels.get('values', {}).values()))
+            # Preserve the vocabulary in the analysis identity before loading
+            # any architecture. Fixed-head models ignore it; renamed/local
+            # zero-shot models must not depend on a repository-name heuristic.
+            if 2 <= len(candidates) <= 1000:
+                model = _selection({**model, 'candidate_labels': candidates}, task)
         if dataset and dataset.get('task', 'classification') != task:
             raise ValueError(f'Load a {task} dataset before analyzing this workspace.')
         model_key = _model_key(model)

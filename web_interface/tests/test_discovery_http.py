@@ -85,6 +85,31 @@ class DiscoveryHTTPTests(unittest.TestCase):
                      '/discoveries/' + 'f'*32 + '/artifacts/../../server.py'):
             self.assertEqual(self.request(path)[0], 404)
 
+    def test_preview_preserves_explicit_model_revisions(self):
+        for task in ('summarization', 'generation'):
+            for revision in ('a'*40, 'b'*40, 'refs/pr/3'):
+                with self.subTest(task=task, revision=revision):
+                    model = {'source': 'huggingface', 'name': 'fixture/model', 'revision': revision}
+                    code, body = self.request('/api/previews', 'POST', body={
+                        'task': task, 'text': 'A cat rests.', 'model': model})
+                    self.assertEqual(code, 202, body)
+                    preview = json.loads(body)
+                    preview = self.wait('/api/previews/' + preview['id'], preview)
+                    self.assertEqual(preview['config']['model'], model)
+
+    def test_preview_rejects_invalid_model_revisions(self):
+        for revision in (True, 1, [], {}, '', ' ', 'r'*257, '../outside',
+                         '/absolute', 'refs//main', 'refs\\main', 'main\n'):
+            with self.subTest(revision=revision):
+                code, body = self.request('/api/previews', 'POST', body={
+                    'task': 'summarization', 'text': 'A cat rests.',
+                    'model': {'source': 'huggingface', 'name': 'fixture/model', 'revision': revision}})
+                if code == 202:
+                    preview = json.loads(body)
+                    self.wait('/api/previews/' + preview['id'], preview)
+                self.assertEqual(code, 400, body)
+                self.assertIn('revision', json.loads(body)['error'])
+
     def test_analysis_search_report_and_reviewed_finetune_roundtrip(self):
         code, _ = self.request('/api/discoveries')
         self.assertEqual(code, 200, 'Discovery endpoints must exist before running the workflow')
@@ -164,6 +189,108 @@ class DiscoveryHTTPTests(unittest.TestCase):
         training = self.wait('/api/finetunes/' + training['id'], training)
         self.assertTrue(Path(training['checkpoint']).is_dir())
         self.assertEqual(training['completed'], 1)
+
+
+class CheckpointReloadHTTPTests(unittest.TestCase):
+    """Use actual tiny weights to exercise the saved-checkpoint selection path."""
+    request = test_http.HTTPTests.request
+    wait = DiscoveryHTTPTests.wait
+
+    def test_finetuned_checkpoint_reanalyzes_and_measures_fresh_failures(self):
+        import hashlib
+        import torch
+        from transformers import ViTConfig, ViTForImageClassification, ViTImageProcessor
+
+        torch.set_num_threads(1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root/'model'
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(9)
+                model = ViTForImageClassification(ViTConfig(
+                    image_size=16, patch_size=8, hidden_size=12, intermediate_size=24,
+                    num_hidden_layers=1, num_attention_heads=3, num_labels=2,
+                    id2label={0: 'dark', 1: 'bright'}))
+                with torch.no_grad():
+                    model.classifier.weight.zero_()
+                    model.classifier.bias.copy_(torch.tensor([1., 0.]))
+                model.save_pretrained(source)
+            ViTImageProcessor(size={'height': 16, 'width': 16}).save_pretrained(source)
+            source_digest = hashlib.sha256((source/'model.safetensors').read_bytes()).hexdigest()
+            images = root/'images'
+            images.mkdir()
+            for index, color in enumerate(('red', 'blue')):
+                Image.new('RGB', (16, 16), color).save(images/f'{index}.png')
+            with patch('server.ThreadingHTTPServer', MemoryServer):
+                self.server = create_server(8000, root/'runs'/'previews')
+            self.addCleanup(self.server.embeddings.release_encoder)
+            code, body = self.request('/api/datasets', 'POST', body={'source': 'folder', 'path': str(images)})
+            self.assertEqual(code, 202, body)
+            dataset = json.loads(body)
+            deadline = time.monotonic() + 5
+            while dataset['status'] == 'loading' and time.monotonic() < deadline:
+                time.sleep(.01)
+                dataset = json.loads(self.request('/api/datasets/' + dataset['id'])[1])
+            self.assertEqual(dataset['status'], 'ready', dataset)
+
+            def analyze_and_discover(path):
+                code, body = self.request('/api/previews', 'POST', body={
+                    'dataset_id': dataset['id'], 'model': {'source': 'local', 'name': str(path)},
+                    'action_space': {'rotation': [0], 'darkness': [.1, .5], 'saturation': []}})
+                self.assertEqual(code, 202, body)
+                preview = json.loads(body)
+                self.wait('/api/previews/' + preview['id'], preview)
+                code, body = self.request('/api/embeddings', 'POST', body={
+                    'preview_id': preview['id'], 'device': 'cpu'})
+                self.assertEqual(code, 202, body)
+                analysis = json.loads(body)
+                analysis = self.wait('/api/embeddings/' + analysis['id'], analysis)
+                code, body = self.request('/api/discoveries', 'POST', body={
+                    'embedding_id': analysis['id'], 'episodes': 40, 'seed': 7, 'device': 'cpu',
+                    'label_map': {'0': 1, '1': 1}})
+                self.assertEqual(code, 202, body)
+                discovery = json.loads(body)
+                discovery = self.wait('/api/discoveries/' + discovery['id'], discovery)
+                return analysis, discovery
+
+            before_analysis, before = analyze_and_discover(source)
+            reviewed = next(row for row in before['records'] if row['input_index'] == 0)
+            code, body = self.request('/api/finetunes', 'POST', body={
+                'discovery_id': before['id'], 'examples': [{'input_index': 0,
+                    'action_id': reviewed['action_id'], 'target': 1}],
+                'epochs': 5, 'learning_rate': .05, 'device': 'cpu', 'seed': 7,
+                'batch_size': 1, 'cleanup_after_finetune': False})
+            self.assertEqual(code, 202, body)
+            training = json.loads(body)
+            training = self.wait('/api/finetunes/' + training['id'], training)
+            after_analysis, after = analyze_and_discover(training['checkpoint'])
+
+            self.assertNotEqual(before_analysis['id'], after_analysis['id'])
+            self.assertNotEqual(before['id'], after['id'])
+            self.assertEqual(after_analysis['model']['name'], training['checkpoint'])
+            self.assertEqual(after['model']['name'], training['checkpoint'])
+            self.assertFalse(after_analysis['features_reused'])
+            self.assertFalse(after_analysis['model_reused'])
+            self.assertEqual(after['embedding_id'], after_analysis['id'])
+            for report in (before, after):
+                self.assertEqual(report['unique_evaluations'], 4)
+                self.assertEqual(report['model_calls'], 6)
+                self.assertEqual(report['policy_statistics']['policy_updates'], 25)
+                self.assertFalse(report['history'][0]['cached'])
+                self.assertEqual(report['history'][0]['model_calls'], 2)
+            original = {(row['input_index'], row['action_id']): row for row in before['records']}
+            updated = {(row['input_index'], row['action_id']): row for row in after['records']}
+            self.assertEqual(set(updated), set(original))
+            self.assertTrue(any(abs(updated[pair]['reward'] - original[pair]['reward']) > 1e-4
+                                for pair in original))
+            self.assertTrue(any(abs(updated[pair]['metrics']['target_probability'] -
+                                    original[pair]['metrics']['target_probability']) > 1e-4
+                                for pair in original))
+            # Head training can change measured failures without moving the frozen encoder's geometry.
+            np.testing.assert_allclose([point['position'] for point in before_analysis['points']],
+                                       [point['position'] for point in after_analysis['points']], atol=1e-7)
+            self.assertEqual(hashlib.sha256((source/'model.safetensors').read_bytes()).hexdigest(), source_digest)
+            self.assertEqual(json.loads(self.request('/api/discoveries/' + before['id'])[1]), before)
 
 
 if __name__ == '__main__':

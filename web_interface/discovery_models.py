@@ -10,9 +10,11 @@ from functools import cached_property
 from pathlib import Path
 
 from classification_labels import model_label_groups
+from failure_analysis import summary_checks
+from summary_grounding import GroundedScorer
 from model_loading import configure_parallel_loading
 from text_encoders import (_dependencies, _encoder_device, _options, _pretrained, _resolved_revision,
-                           _selection, _token_limit, SummarizationEncoder, DiffusionPromptEncoder)
+                           _selection, SummarizationEncoder, DiffusionPromptEncoder)
 
 
 def unit(value, name='score'):
@@ -80,16 +82,44 @@ class ClassificationEvaluator(Evaluator):
 
     def __init__(self,model,config,directory,*,encoder=None,shared=None):
         super().__init__(config,directory)
-        selection=_selection(model,'classification')
+        from embeddings import _selection as image_selection
+        selection=image_selection(model,'classification')
         self.torch,transformers=_dependencies()
         self.device=_device(self.torch,config)
         if shared is not None:
             if shared.device!=self.device:
                 raise ValueError('Shared evaluation resources must use the requested device.')
             self.model,self.processor,self.revision=shared.model,shared.processor,shared.revision
+            self.is_clip=getattr(shared,'is_clip',False)
+            if self.is_clip:
+                self.text_features=shared.text_features
             return
         try:
             cfg=transformers.AutoConfig.from_pretrained(selection['name'],**_options(selection))
+            self.is_clip=cfg.model_type=='clip'
+            if self.is_clip:
+                labels=selection.get('candidate_labels')
+                if not labels:
+                    raise ValueError('CLIP classification requires candidate class names from the dataset or model options.')
+                self.revision=_resolved_revision(selection,getattr(cfg,'_commit_hash',None))
+                options=_options(selection,self.revision)
+                if encoder is not None and getattr(encoder,'is_clip',False):
+                    self.model=encoder.model
+                else:
+                    loaded,info=transformers.CLIPModel.from_pretrained(selection['name'],config=cfg,
+                        weights_only=True,output_loading_info=True,**options)
+                    self.model=_pretrained(loaded,info,self.torch).to(self.device)
+                self.processor=transformers.CLIPProcessor.from_pretrained(selection['name'],use_fast=False,**options)
+                self.model.config.id2label=dict(enumerate(labels))
+                self.model.config.label2id={v:i for i,v in enumerate(labels)}
+                tokens=self.processor.tokenizer(['a photo of '+label for label in labels],padding=True,
+                    truncation=False,return_tensors='pt',return_token_type_ids=False).to(self.device)
+                if tokens['input_ids'].shape[-1]>cfg.text_config.max_position_embeddings:
+                    raise ValueError('A candidate class name exceeds the CLIP text token limit.')
+                with self.torch.inference_mode():
+                    text=self.model.get_text_features(**tokens)
+                    self.text_features=self.torch.nn.functional.normalize(text,dim=-1)
+                return
             if cfg.num_labels<2 or getattr(cfg,'problem_type',None) not in (None,'single_label_classification'):
                 raise ValueError('Only single-label multiclass image classifiers are supported; regression and multi-label checkpoints need different metrics.')
             self.revision=_resolved_revision(selection,getattr(cfg,'_commit_hash',None))
@@ -116,7 +146,11 @@ class ClassificationEvaluator(Evaluator):
     def predict(self,value,*,seed=0,artifact_name='sample'):
         inputs=self.processor(images=value,return_tensors='pt').to(self.device)
         with self.torch.inference_mode():
-            logits=self.model(**inputs).logits
+            if self.is_clip:
+                features=self.torch.nn.functional.normalize(self.model.get_image_features(**inputs),dim=-1)
+                logits=self.model.logit_scale.exp()*(features@self.text_features.T)
+            else:
+                logits=self.model(**inputs).logits
             if logits.shape!=(1,self.model.config.num_labels) or not self.torch.isfinite(logits).all():
                 raise ValueError('Classifier returned invalid or nonfinite logits.')
             probabilities=logits.softmax(-1)[0].cpu().tolist()
@@ -126,6 +160,7 @@ class ClassificationEvaluator(Evaluator):
 
     def describe(self):
         return {**super().describe(),
+                'classification_mode':'zero-shot CLIP with candidate class names' if self.is_clip else 'pretrained classification head',
                 'reward_formula':'0.5*error + 0.25*error*max_wrong_probability + 0.25*max(0,(baseline_target_probability-target_probability)/baseline_target_probability)',
                 'severity_formula':'1 for a target error, otherwise relative target-confidence drop',
                 'label_policy':'Dataset/manual targets map to model classes or declared ImageNet pet groups. Group errors use the actual top-1 class; target confidence sums group probabilities. Legacy unlabelled scores measure original-prediction consistency.',
@@ -191,54 +226,6 @@ def nonrepetition(text):
     return len(set(grams))/len(grams)
 
 
-class GroundedScorer:
-    def __init__(self,model,device):
-        configure_parallel_loading()
-        self.torch,transformers=_dependencies()
-        selection=_selection(model,'summarization')
-        cfg=transformers.AutoConfig.from_pretrained(selection['name'],**_options(selection))
-        revision=_resolved_revision(selection,getattr(cfg,'_commit_hash',None))
-        options=_options(selection,revision)
-        loaded,info=transformers.AutoModelForSequenceClassification.from_pretrained(
-            selection['name'],config=cfg,weights_only=True,output_loading_info=True,**options)
-        self.model=_pretrained(loaded,info,self.torch).to(device)
-        self.tokenizer=transformers.AutoTokenizer.from_pretrained(selection['name'],**options)
-        ids=[int(key) for key,label in cfg.id2label.items() if label.lower() in ('entailment','entail')]
-        if len(ids)!=1:
-            raise ValueError('NLI scorer must declare an unambiguous entailment label in id2label.')
-        self.entailment_id=ids[0]
-        self.limit=_token_limit(self.tokenizer,cfg,default=512)
-        self.device=device
-        self.identity={'name':selection['name'],'revision':revision}
-
-    def score(self,source,summary):
-        if not summary.strip():
-            return 0.
-        source_ids=self.tokenizer.encode(source,add_special_tokens=False)
-        window=max(4,(self.limit-8)//2)
-        windows=[self.tokenizer.decode(source_ids[i:i+window],skip_special_tokens=True)
-                 for i in range(0,len(source_ids),max(1,window//2))]
-        if not windows:
-            raise ValueError('Grounded scoring needs nonempty source text.')
-        claims=[text.strip() for text in re.split(r'(?<=[.!?])\s+|\n+',summary) if text.strip()]
-        scores=[]
-        for claim in claims:
-            if len(self.tokenizer.encode(claim,add_special_tokens=False))>window:
-                raise ValueError('Generated summary sentence exceeds grounded scorer input limit.')
-            support=[]
-            for premise in windows:
-                inputs=self.tokenizer(premise,claim,return_tensors='pt',truncation=False).to(self.device)
-                if inputs['input_ids'].shape[-1]>self.limit:
-                    raise ValueError('Grounded NLI pair exceeds scorer input limit.')
-                with self.torch.inference_mode():
-                    logits=self.model(**inputs).logits
-                    if not self.torch.isfinite(logits).all():
-                        raise ValueError('NLI returned nonfinite logits.')
-                    support.append(float(logits.softmax(-1)[0,self.entailment_id]))
-            scores.append(max(support))
-        return sum(scores)/len(scores) if scores else 0.
-
-
 class SummarizationEvaluator(Evaluator):
     limitations='ROUGE measures reference overlap; NLI estimates source support. Both are automated review signals.'
 
@@ -264,7 +251,8 @@ class SummarizationEvaluator(Evaluator):
         if isinstance(self.max_new_tokens,bool) or not isinstance(self.max_new_tokens,int) or not 1<=self.max_new_tokens<=512:
             raise ValueError('max_new_tokens must be an integer from 1 to 512.')
         limits=[]
-        for decoder_config in (self.model.config,self.model.get_decoder().config):
+        configs = (self.model.config,) if self.encoder.is_causal else (self.model.config,self.model.get_decoder().config)
+        for decoder_config in configs:
             limits.extend(getattr(decoder_config,name,None) for name in
                           ('max_position_embeddings','max_decoder_position_embeddings','max_target_positions','n_positions'))
         limits=[int(value) for value in limits if not isinstance(value,bool) and isinstance(value,(int,float))
@@ -286,16 +274,37 @@ class SummarizationEvaluator(Evaluator):
         overlap,repetition=rouge_l(reference,text),nonrepetition(text)
         metrics={'rouge_l':overlap,'nonrepetition':repetition}
         quality=overlap*repetition
+        source=self.source if source is None else source
+        result={'summary':text,'summary_checks':summary_checks(source,text)}
         if self.metric=='grounded':
-            metrics['source_support']=self.nli.score(self.source if source is None else source,text)
-            quality=math.sqrt(quality*metrics['source_support'])
-        return {'summary':text,'quality':quality,'components':metrics}
+            grounding=self.nli.assess(source,text)
+            result['grounding']=grounding
+            metrics['source_support']=grounding['source_support']
+            metrics['grounding_used']=bool(grounding['reliable'] and grounding['source_support'] is not None)
+            if metrics['grounding_used']:
+                quality=math.sqrt(quality*unit(metrics['source_support'],'source support'))
+        return {**result,'quality':quality,'components':metrics}
 
     def predict(self,value,*,seed=0,artifact_name='sample',reference_summary=None):
         if self.dataset_references and (not isinstance(reference_summary,str) or not reference_summary.strip()):
             raise ValueError('Dataset inference requires this article’s explicit reference summary.')
         options={'truncate':True} if self.truncate_inputs else {}
-        inputs={key:tensor.to(self.device) for key,tensor in self.encoder._prepare([value],self.encoder.prefix,**options).items()}
+        if self.encoder.is_causal:
+            inputs,full_tokens,visible_source,truncated=self.encoder.prepare_completion(
+                value,self.max_new_tokens,truncate=self.truncate_inputs)
+        else:
+            inputs={key:tensor.to(self.device) for key,tensor in self.encoder._prepare([value],self.encoder.prefix,**options).items()}
+            full_tokens=len(self.tokenizer.encode(self.encoder.prefix+value,add_special_tokens=True,verbose=False))
+            visible_source=value
+            truncated=full_tokens>int(inputs['attention_mask'][0].sum())
+        visible_tokens=int(inputs['attention_mask'][0].sum())
+        # Score support against what the model actually saw. The complete
+        # reference remains an intent proxy and truncation is reported separately.
+        if truncated and not self.encoder.is_causal:
+            visible_source=self.tokenizer.decode(inputs['input_ids'][0],skip_special_tokens=True)
+            prefix=self.encoder.prefix.strip()
+            if prefix and visible_source.startswith(prefix):
+                visible_source=visible_source[len(prefix):].lstrip()
         generation=copy.deepcopy(self.model.generation_config)
         generation.min_length=0
         generation.min_new_tokens=0
@@ -306,28 +315,47 @@ class SummarizationEvaluator(Evaluator):
         generation.num_return_sequences=1
         generation.do_sample=False
         generation.max_new_tokens=self.max_new_tokens
+        generation.pad_token_id=self.tokenizer.pad_token_id
+        # Checkpoint diagnostics can change generate()'s return type and retain
+        # vocabulary scores or hidden states for every token. Reviews need IDs.
+        generation.return_dict_in_generate=False
+        generation.output_scores=False
+        generation.output_logits=False
+        generation.output_attentions=False
+        generation.output_hidden_states=False
         with self.torch.inference_mode():
             generated=self.model.generate(**inputs,generation_config=generation,use_model_defaults=False)
-        return self.measure_summary(self.tokenizer.decode(generated[0],skip_special_tokens=True),source=value,
+        completion=generated[0,inputs['input_ids'].shape[-1]:] if self.encoder.is_causal else generated[0]
+        result=self.measure_summary(self.tokenizer.decode(completion,skip_special_tokens=True),source=visible_source,
                                     reference=reference_summary)
+        result['input_coverage']=dict(truncated=truncated,source_tokens=full_tokens,model_tokens=visible_tokens,
+                                     limit=self.encoder.max_tokens,evaluated_source='visible' if truncated else 'complete')
+        return result
 
     def score(self,output,baseline,*,target=None):
         quality,original=unit(output['quality']),unit(baseline['quality'])
+        used=output['components'].get('grounding_used',True) and baseline['components'].get('grounding_used',True)
+        if self.metric=='grounded' and not used:
+            # Compare the same metric on both sides when either NLI assessment
+            # fails its reliability checks; do not manufacture a baseline drop.
+            quality=unit(output['components']['rouge_l'])*unit(output['components']['nonrepetition'])
+            original=unit(baseline['components']['rouge_l'])*unit(baseline['components']['nonrepetition'])
         drop=max(0.,original-quality)
         return {'reward':.5*(1-quality)+.5*drop,'severity':1-quality,'failure':quality<.5 or drop>self.threshold,
                 'criterion':self.criterion,'metrics':{**output['components'],'quality':quality,
-                'baseline_quality':original,'quality_drop':drop,'baseline_low_quality':original<.5}}
+                'baseline_quality':original,'quality_drop':drop,'baseline_low_quality':original<.5,
+                **({'grounding_used':bool(used)} if self.metric=='grounded' else {})}}
 
     def describe(self):
         result=super().describe()
         result['max_new_tokens']=self.max_new_tokens
         result['generation_policy']='Deterministic greedy decoding; min_length/min_new_tokens=0, max_new_tokens capped by decoder capacity, beam-only flags reset.'
-        result['grounding_policy']='NLI source support uses the evaluated input. Original-reference overlap is an intent-preservation proxy; meaning-changing actions require human review.'
-        result['quality_formula']='ROUGE-L F1 × distinct-bigram ratio; grounded: sqrt(reference quality × mean sentence NLI support)'
+        result['grounding_policy']='NLI source support uses the evaluated input visible to the model. Raw and whitespace-collapsed source assessments test formatting sensitivity; unstable or incomplete NLI assessments are excluded from the paired reward. Original-reference overlap is an intent-preservation proxy; meaning-changing actions require human review.'
+        result['quality_formula']='ROUGE-L F1 × distinct-bigram ratio; reliable grounded pair: sqrt(reference quality × mean sentence NLI support). Otherwise both sides use reference quality.'
         result['reward_formula']='0.5 × (1 - quality) + 0.5 × max(0, baseline quality - quality)'
         result['reference_policy']='Per-article dataset reference' if self.dataset_references else 'Explicit reference summary'
         result['input_policy']=dict(max_input_tokens=self.encoder.max_tokens, truncate=self.truncate_inputs,
-                                   policy='Source tokens beyond the model input limit are omitted; references remain complete.'
+                                   policy='Source tokens beyond the model input limit are omitted; support uses the visible source, references remain complete, and the result is marked inconclusive.'
                                    if self.truncate_inputs else 'Inputs exceeding the model token limit are rejected.')
         if hasattr(self,'nli'):
             result['nli_model']=self.nli.identity
@@ -479,7 +507,10 @@ class GenerationEvaluator(Evaluator):
             self._generation_runtime=shared._generation_runtime
         else:
             self.pipeline,self.revision=load_diffusion(model,encoder=self.encoder)
-            self._generation_runtime=GenerationRuntime(self.pipeline,self.encoder,self.device,precision)
+            turbo = (getattr(self.encoder,'is_turbo',False)
+                     or model['name'].rstrip('/').split('/')[-1] == 'sd-turbo')
+            self._generation_runtime=GenerationRuntime(self.pipeline,self.encoder,self.device,precision,
+                guidance_scale=0. if turbo else 7.5)
         self.pipeline.set_progress_bar_config(disable=True)
         self.steps=config.get('generation_steps',12)
         self.size=config.get('generation_size',256)

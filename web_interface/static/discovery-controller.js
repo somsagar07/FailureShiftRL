@@ -7,7 +7,7 @@ class DiscoveryController {
     this.el=id=>document.getElementById(id);
     this.learningRates={classification:'0.001',summarization:'0.00002',generation:'0.0001'};
     this.failureThresholds={classification:'0.15',summarization:'0.15',generation:'0.5'};
-    this.trainingOptions={};this.trainingDefaults={'finetune-epochs':'1','finetune-device':'auto','finetune-batch-size':'auto','finetune-seed':'42','finetune-weight-decay':'0.01','finetune-max-grad-norm':'1','finetune-cleanup':true};
+    this.trainingOptions={};this.trainingDefaults={'finetune-epochs':'1','finetune-device':'auto','finetune-batch-size':'auto','finetune-seed':'42','finetune-weight-decay':'0.01','finetune-max-grad-norm':'1','finetune-cleanup':true,'finetune-generation-size':'auto','finetune-generation-framing':'preserve'};
     this.version=0;this.job=null;this.training=null;this.selected=null;this.context=null;this.inspectionOpen=false;
     this.pending=false;this.pendingKind=null;this.polling=null;this.cancelling=null;
     this.landscapeMode='predicted';
@@ -38,11 +38,16 @@ class DiscoveryController {
     });
     this.adaptation=new AdaptationController({api,explorer,discovery:this});
     bind('finetune-start','click',()=>this.adaptation.start());
-    bind('finetune-use','click',()=>{if(this.attached&&this.training?.status==='completed'&&this.training.checkpoint)this.onCheckpoint(this.training.checkpoint);});
+    bind('finetune-use','click',()=>{if(this.checkpointUsable)this.onCheckpoint(this.training.checkpoint);});
     this.editLabels(false);this.updateLabels();this.configure();this.controls();
   }
   get active() {return this.pending||[this.job,this.training].some(job=>job&&['queued','running'].includes(job.status));}
   get trainingActive() {return this.pendingKind==='finetunes'||Boolean(this.training&&['queued','running'].includes(this.training.status));}
+  get checkpointUsable() {
+    const job=this.training,validation=job?.validation;
+    return Boolean(this.attached&&!this.active&&job?.status==='completed'&&job.checkpoint&&(!validation||validation.status==='not_requested'||
+      (validation.status==='completed'&&['improved','inconclusive','regressed'].includes(validation.comparison?.verdict))));
+  }
   get analysisReady() {return Boolean(this.context&&this.context===this.explorer.job?.id);}
   get attached() {return Boolean(this.analysisReady&&this.job?.embedding_id===this.context);}
   get summaryDataset() {return this.explorer.task==='summarization'&&Boolean(this.explorer.job?.references?.dataset_id||this.explorer.preview?.dataset||this.explorer.preview?.config.dataset_id);}
@@ -84,12 +89,13 @@ class DiscoveryController {
     this.controls();
   }
   hideResults() {
-    for(const id of ['discovery-inspector','discovery-records','severity-legend','finetune-checkpoint','finetune-report','finetune-cleanup-status'])this.el(id).hidden=true;
+    for(const id of ['discovery-inspector','discovery-records','discovery-analysis-summary','severity-legend','finetune-checkpoint','finetune-report','finetune-cleanup-status','finetune-validation-status'])this.el(id).hidden=true;
     if(this.explorer.setDiscovery)this.explorer.setDiscovery(null);else this.explorer.view.setDiscovery?.(null);
   }
   configure() {
     const task=this.explorer.task;
     if(this.rateTask!==task) {
+      this.el('adapt-validation-prompts').value='';
       if(this.rateTask) {
         this.learningRates[this.rateTask]=this.el('finetune-lr').value;
         this.failureThresholds[this.rateTask]=this.el('discovery-threshold').value;
@@ -118,16 +124,18 @@ class DiscoveryController {
       const {total,count,missing}=this.generationRequirements;
       this.el('discovery-requirements-status').textContent=`${count} / ${total} prompts have requirements${missing?` · ${missing} use visual content review against the prompt.`:'. Dataset checks review content.'}`;
       this.el('discovery-requirements-status').className='hint';
-      this.el('discovery-generation').textContent='One reward: the largest measured content, instruction, visual defect, or bias score (0–1). Style, lighting, and detail are reviewed when enabled. Scores flag candidates for inspection.';
+      this.el('discovery-generation').textContent='One reward: the largest measured content, instruction, visual defect, or bias score (0–1). Enabled presentation settings are reviewed. Scores flag candidates for inspection.';
     }
   }
   invalidate() {
     this.labelRead++;this.labelLoading=false;
     this.context=null;this.selected=null;this.inspectionOpen=false;
     this.el('discovery-inspector').hidden=true;this.el('discovery-records').hidden=true;
+    this.el('discovery-analysis-summary').hidden=true;this.el('discovery-analysis-summary').replaceChildren();
     this.el('severity-legend').hidden=true;
     this.el('finetune-checkpoint').hidden=true;this.el('finetune-report').hidden=true;
     this.el('finetune-cleanup-status').hidden=true;this.el('finetune-cleanup-status').textContent='';
+    this.el('finetune-validation-status').hidden=true;this.el('finetune-validation-status').textContent='';
     this.adaptation.reset();
     if(this.explorer.setDiscovery)this.explorer.setDiscovery(null);else this.explorer.view.setDiscovery?.(null);
     if(!this.active) {
@@ -147,6 +155,7 @@ class DiscoveryController {
     for(const id of ['discovery-cancel','finetune-cancel'])this.el(id).disabled=this.cancelling===this.version;
     this.el('discovery-retry').disabled=this.cancelling===this.version||this.polling?.version===this.version;
     this.adaptation.controls();
+    this.el('finetune-use').disabled=!this.checkpointUsable;
     this.onChange();
   }
   message(message) {this.el('discovery-error').textContent=message;this.el('discovery-error').hidden=!message;}
@@ -367,6 +376,7 @@ class DiscoveryController {
       this.el('finetune-progress').hidden=true;this.el('finetune-progress').value=0;this.el('finetune-path').value='';
       this.el('finetune-status').textContent='';this.el('finetune-batch-info').textContent='';this.receive('discoveries',job,version);
       this.el('finetune-cleanup-status').hidden=true;this.el('finetune-cleanup-status').textContent='';
+      this.el('finetune-validation-status').hidden=true;this.el('finetune-validation-status').textContent='';
     } catch(error) {
       if(version!==this.version)return;
       if(this.pendingKind==='discoveries')this.el('discovery-status').textContent='Could not start discovery.';
@@ -415,12 +425,28 @@ class DiscoveryController {
     for(const [name,url] of Object.entries(job.artifacts||{})){if(typeof url!=='string'||!url.startsWith('/discoveries/'))continue;const a=document.createElement('a');a.textContent=`Open ${name} ↗`;a.href=url;a.target='_blank';a.rel='noopener noreferrer';links.push(a);}
     this.el('discovery-artifacts').replaceChildren(...links);
     if(!this.attached){this.hideResults();return;}
+    this.renderAnalysisSummary();
     if(this.explorer.task==='classification')this.renderLabels();
     this.el('severity-legend').hidden=false;
     if(this.explorer.setDiscovery)this.explorer.setDiscovery(job);else this.explorer.view.setDiscovery(job);
     this.renderLegend();
     this.inspectionOptions();
     this.inspectSelected(false);
+  }
+  analysisLabel(status) {
+    return {failure:'Failure',candidate:'Candidate',no_failure_observed:'No flag',inconclusive:'Inconclusive'}[status]||'Unclassified';
+  }
+  renderAnalysisSummary() {
+    const summary=this.job?.analysis_summary,container=this.el('discovery-analysis-summary');
+    container.replaceChildren();container.hidden=!summary;if(!summary)return;
+    const counts=values=>['failure','candidate','no_failure_observed','inconclusive'].map(status=>{
+      const count=values?.[status]||0,label=this.analysisLabel(status).toLowerCase();
+      return `${count} ${label}${count!==1&&['failure','candidate'].includes(status)?'s':''}`;
+    }).join(' · ');
+    container.append(this.paragraph(`${summary.unique_pairs} / ${summary.total_pairs} measured pairs · ${summary.inputs_evaluated} / ${summary.total_inputs} inputs`),
+      this.paragraph(counts(summary.counts)));
+    if(summary.baseline_inputs!==undefined)container.append(this.paragraph(`Baselines (${summary.baseline_inputs} inputs): ${counts(summary.baseline_counts)}`));
+    const note=this.paragraph('No flag does not establish that the output is correct.');note.className='hint';container.append(note);
   }
   renderLegend() {
     const predicted=this.landscapeMode==='predicted',available=this.job?.predicted_landscape?.policy_updates>0;
@@ -429,7 +455,7 @@ class DiscoveryController {
     this.el('landscape-scale-label').textContent=predicted?'Predicted reward':'Measured severity';
     this.el('landscape-scale').title=predicted?
       'DQN expected reward, not failure probability. Originals average all action rewards. Colors use 0 to 1; out-of-range estimates use the nearest end color.':
-      'Measured severity from model evaluations. Originals average their tested action pairs only.';
+      'Measured severity from model evaluations; judge scores can be uncertain. Originals average their tested action pairs only. Inspect a pair for its analysis status.';
     this.el('landscape-unavailable').textContent=predicted?(available?'Unavailable':'Awaiting learning'):'Unevaluated';
     this.el('landscape-evidence').hidden=!predicted||!available;
   }
@@ -439,7 +465,12 @@ class DiscoveryController {
     const selector=this.el('discovery-pair');
     selector.title='Highest measured severity first; unevaluated actions last.';
     const option=(value,label)=>{const el=document.createElement('option');el.value=value;el.textContent=label;return el;};
-    const choices=records.map(record=>option(this.key(record),`Input ${record.input_index} · action ${record.action_id} · severity ${this.percent(record.severity)} (${record.visits} visits)`));
+    const choices=records.map(record=>{
+      const status=record.analysis?`${this.analysisLabel(record.analysis.status)} · `:'';
+      const evidence=Number.isInteger(record.measurements)?`${record.measurements} measured · ${Math.max(0,(record.visits??0)-record.measurements)} cached reuses`:`${record.visits} visits`;
+      const warnings=record.analysis?.warnings?.length;
+      return option(this.key(record),`Input ${record.input_index} · action ${record.action_id} · ${status}severity ${this.percent(record.severity)} (${evidence})${warnings?` · ${warnings} warning${warnings===1?'':'s'}`:''}`);
+    });
     if(this.selected&&!records.some(record=>this.key(record)===this.selected)) {
       const [index,action]=this.selected.split(':');
       choices.push(option(this.selected,`Input ${index} · action ${action} · unevaluated`));
@@ -456,6 +487,38 @@ class DiscoveryController {
   }
   paragraph(text) {const el=document.createElement('p');el.textContent=text;return el;}
   percent(value) {return typeof value==='number'&&Number.isFinite(value)?`${(100*value).toFixed(1)}%`:'—';}
+  notes(items,className='analysis-notes') {
+    const list=document.createElement('ul');list.className=className;
+    for(const item of items||[])if(typeof item?.message==='string') {
+      const row=document.createElement('li');row.textContent=item.message;list.append(row);
+    }
+    return list;
+  }
+  analysisReview(analysis) {
+    if(!analysis)return null;
+    const section=document.createElement('div'),badge=document.createElement('span');section.className='analysis-review';
+    badge.className=`analysis-badge analysis-${analysis.status}`;badge.textContent=this.analysisLabel(analysis.status);section.append(badge);
+    if(analysis.basis){const basis=document.createElement('span');basis.className='analysis-basis';basis.textContent=`Basis: ${String(analysis.basis).replaceAll('_',' ')}`;section.append(basis);}
+    if(analysis.reasons?.length)section.append(this.notes(analysis.reasons));
+    if(analysis.warnings?.length)section.append(this.notes(analysis.warnings,'analysis-notes analysis-warnings'));
+    if(analysis.status==='no_failure_observed')section.append(this.paragraph('No flag does not establish that the output is correct.'));
+    return section;
+  }
+  groundingReview(grounding) {
+    const detail=document.createElement('details'),summary=document.createElement('summary');detail.className='reference-disclosure grounding-evidence';
+    summary.textContent=`Source grounding${grounding.reliable===false?' · needs review':''}`;detail.append(summary);
+    const support=value=>typeof value==='number'&&Number.isFinite(value)?this.percent(value):'Unavailable';
+    detail.append(this.paragraph(`Source support (NLI): ${support(grounding.source_support)} · formatting sensitivity: ${this.format(grounding.format_delta)}`));
+    const claims=document.createElement('ol');
+    for(const claim of grounding.claims||[]) {
+      const status=[claim.status?.replaceAll('_',' '),claim.reliable===false?'needs review':''].filter(Boolean).join(' · ');
+      const row=document.createElement('li');row.append(this.paragraph(String(claim.text||'')),
+        this.paragraph(`Support: ${support(claim.support)}${status?` · ${status}`:''} · formatting sensitivity: ${this.format(claim.format_delta)}`),
+        this.paragraph(`Source evidence: ${claim.evidence||'Unavailable'}`));claims.append(row);
+    }
+    if(claims.children.length)detail.append(claims);
+    return detail;
+  }
   failureReview(output) {
     const scores=document.createElement('dl'),details=document.createElement('details'),summary=document.createElement('summary');
     scores.className='metric-rows failure-scores';details.className='reference-disclosure failure-evidence';summary.textContent='Failure evidence';details.append(summary);
@@ -490,7 +553,7 @@ class DiscoveryController {
     }
     return [scores,details];
   }
-  output(id,output) {
+  output(id,output,analysis=null) {
     const children=[];
     if(!output){this.el(id).replaceChildren(this.paragraph('Not evaluated.'));return;}
     if(output.image&&typeof output.image==='string'&&output.image.startsWith('/discoveries/')) {
@@ -502,6 +565,13 @@ class DiscoveryController {
       children.push(this.paragraph(`Prediction: ${output.label??'Unnamed class'} (class ${output.class_id??'—'})`));
       children.push(this.paragraph(`Confidence: ${this.percent(output.confidence)}`));
     }
+    if(output.grounding)children.push(this.groundingReview(output.grounding));
+    const displayed=new Set((analysis?.warnings||[]).map(warning=>warning.message)),warnings=[];
+    for(const warning of [...(output.grounding?.warnings||[]),...(output.input_analysis?.warnings||[])]) {
+      if(displayed.has(warning.message))continue;
+      displayed.add(warning.message);warnings.push(warning);
+    }
+    if(warnings.length)children.push(this.notes(warnings,'analysis-notes analysis-warnings'));
     if(output.clip_similarity!==undefined)children.push(this.paragraph(`CLIP scene alignment: ${this.format(output.clip_similarity)}`));
     if(output.prompt)children.push(this.paragraph(`Prompt: ${output.prompt}`));
     if(output.seed!==undefined)children.push(this.paragraph(`Noise seed: ${output.seed}`));
@@ -536,7 +606,11 @@ class DiscoveryController {
     Object.assign(labels,{content_failure:'Content failure score',instructions_failure:'Instruction failure score',visual_failure:'Visual defect score',bias_failure:'Bias disparity score',baseline_severity:'Baseline severity',severity_increase:'Severity increase from baseline',failure_threshold:'Failure severity threshold'});
     if(record?.output?.failure_scores)Object.assign(labels,{quality:'Combined quality (1 − severity)',baseline_quality:'Baseline quality (1 − severity)'});
     else if(record?.output?.checks?.length)Object.assign(labels,{quality:'Content requirements passed (fraction)',baseline_quality:'Original requirements passed (fraction)',quality_drop:'Decrease in passed requirements (fraction)'});
-    const rows=record?[['Criterion',record.criterion||this.job?.criterion||'—'],['Severity',this.percent(record.severity)],['Search reward',this.format(record.reward)],['Observed failure rate',this.percent(record.failure_rate)]]:[];
+    const rows=record?[['Criterion',record.criterion||this.job?.criterion||'—'],['Severity',this.percent(record.severity)],['Search reward',this.format(record.reward)]]:[];
+    if(record&&Number.isInteger(record.measurements)) {
+      rows.push(['Measured results',String(record.measurements)],['Cached reuses',String(Math.max(0,(record.visits??0)-record.measurements))]);
+      if(record.seed!==undefined)rows.push(['Seed',String(record.seed)]);
+    } else if(record)rows.push(['Legacy failure indicator',record.failure_rate===1?'Flagged':record.failure_rate===0?'No flag':this.percent(record.failure_rate)],['Policy visits',String(record.visits??0)]);
     const prediction=this.explorer.predictionFor?.(Number(this.selected?.split(':')[0]),action);
     if(prediction)rows.push(['Predicted reward',this.format(prediction.q_value)],
       ['DQN action preference (this input)',this.percent(prediction.preference)],['Evidence',record?'Model evaluated':'Estimated only']);
@@ -549,6 +623,7 @@ class DiscoveryController {
     const list=document.createElement('dl');list.className='metric-rows';
     for(const [label,value] of rows){const name=document.createElement('dt'),detail=document.createElement('dd');name.textContent=label;detail.textContent=value;list.append(name,detail);}
     this.el('discovery-components').replaceChildren();this.el('discovery-components').textContent=record?'':'This action has not been evaluated.';
+    const review=this.analysisReview(record?.analysis);if(review)this.el('discovery-components').append(review);
     if(rows.length)this.el('discovery-components').append(list);
   }
   inspectSelected(focus=false) {
@@ -558,7 +633,9 @@ class DiscoveryController {
     const record=this.job?.records?.find(record=>this.key(record)===this.selected);
     const index=record?.input_index??Number(this.selected.split(':')[0]);
     const baseline=this.job?.baseline?.find(item=>item.input_index===index);
-    this.output('discovery-baseline',baseline?.output);this.output('discovery-output',record?.output);
+    this.output('discovery-baseline',baseline?.output,baseline?.analysis);this.output('discovery-output',record?.output,record?.analysis);
+    const baselineReview=this.analysisReview(baseline?.analysis),baselineAnalysis=this.el('discovery-baseline-analysis');
+    baselineAnalysis.replaceChildren(...(baselineReview?[baselineReview]:[]));baselineAnalysis.hidden=!baselineReview;
     this.metricRows(record,record?.action_id??(this.selected?Number(this.selected.split(':')[1]):null));
     if(focus&&record){this.explorer.focusMeasured(record.input_index,record.action_id);this.adaptation.setGraphAction(record.input_index,record.action_id);}
     this.controls();
@@ -577,6 +654,7 @@ class DiscoveryController {
       this.el('finetune-progress').hidden=true;this.el('finetune-progress').value=0;
       this.el('finetune-batch-info').textContent='';
       this.el('finetune-cleanup-status').hidden=true;this.el('finetune-cleanup-status').textContent='';
+      this.el('finetune-validation-status').hidden=true;this.el('finetune-validation-status').textContent='';
       const job=await this.api('/api/finetunes',config);if(version!==this.version)return;
       this.pending=false;this.receive('finetunes',job,version);
     } catch(error){
@@ -599,6 +677,21 @@ class DiscoveryController {
     this.el('finetune-batch-info').textContent=job.effective_batch_size?`Batch ${job.effective_batch_size} · processed in chunks of ${job.micro_batch_size||job.effective_batch_size}${job.oom_retries?` · ${job.oom_retries} memory adjustment${job.oom_retries===1?'':'s'}`:''}`:'';
     const cleanup=this.el('finetune-cleanup-status'),cleanupMessage=job.status==='completed'&&typeof job.cleanup?.message==='string'?job.cleanup.message:'';
     cleanup.textContent=cleanupMessage;cleanup.hidden=!cleanupMessage;
+    const validation=job.validation,validationStatus=this.el('finetune-validation-status'),comparison=validation?.comparison;
+    const validationParts=validation?[validation.status==='not_requested'?'Validation not run':`Validation ${validation.status}`]:[];
+    if(validation?.status==='running'&&validation.phase)validationParts.push(validation.phase);
+    if(validation?.status==='running'&&job.validation_total)validationParts.push(`${count(job.validation_completed)}/${count(job.validation_total)} images`);
+    if(validation?.status==='completed'&&comparison) {
+      validationParts.push(comparison.verdict==='improved'?'improved · measured improvement':comparison.verdict);
+      for(const [name,result] of [['Selected',comparison.selected],['Clean',comparison.clean]])
+        if(Number.isFinite(result?.before_mean_severity)&&Number.isFinite(result?.after_mean_severity))
+          validationParts.push(`${name} mean severity ${this.format(result.before_mean_severity)} → ${this.format(result.after_mean_severity)}`);
+      if(comparison.reason)validationParts.push(comparison.reason);
+    }
+    validationStatus.textContent=validationParts.filter(Boolean).join(' · ');validationStatus.hidden=!validation;
+    const candidate=validation?.status==='completed'&&['inconclusive','regressed'].includes(comparison?.verdict);
+    this.el('finetune-use').textContent=candidate?'Select candidate checkpoint for Analyze':'Select checkpoint for Analyze';
+    this.el('finetune-use').disabled=!this.checkpointUsable;
     if(job.error)this.adaptation.message(job.error);
     this.el('finetune-progress').hidden=!job.total;this.el('finetune-progress').max=job.total||1;this.el('finetune-progress').value=job.completed||0;
     this.el('finetune-checkpoint').hidden=job.status!=='completed'||!job.checkpoint||!this.attached;

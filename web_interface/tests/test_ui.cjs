@@ -150,7 +150,7 @@ function chooseValues(key,value){
   assert.equal(embeddingRequested.preview_id,job.id);
   assert.equal(modelRequested,undefined,'embedding loading handles model download without a second snapshot job');
   assert.equal(get('embedding-wrap').hidden,false);
-  assert.equal(get('dataset-preview').hidden,true,'the completed graph replaces the raw sample preview');
+  assert.equal(get('dataset-preview').hidden,true,`the completed graph replaces the raw sample preview; ${get('form-error').textContent}`);
   assert.equal(get('graph-wrap').hidden,true);
   assert.equal(get('details').hidden,true,'the overview starts with all originals, before selecting an image');
   get('image-select').value='0';await get('image-select').events.change();await flush();
@@ -303,7 +303,7 @@ function chooseValues(key,value){
   assert.equal(get('generate').disabled,true,'the next workspace needs a loaded dataset or entered prompt');
   get('generation-source').value='text';get('generation-source').events.change();
   assert.equal(get('generate').disabled,false,'canceling a stale analysis releases the next workspace');
-  assert.ok(get('model-preset').children.some(option=>option.value==='segmind/tiny-sd'),'model presets follow the workspace domain');
+  assert.ok(get('model-preset').children.some(group=>group.children?.some(option=>option.value==='segmind/tiny-sd')),'model presets follow the workspace domain');
   assert.equal(get('model-name-fields').hidden,true,'the new domain selects a preset, not a stale custom model');
   for(const key of ['lighting','detail'])removeAction(key);
   chooseValues('style','value-0');

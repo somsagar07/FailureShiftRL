@@ -69,7 +69,7 @@ class CoreTests(unittest.TestCase):
             ('classification', {'rotation': [181], 'darkness': [], 'saturation': []}),
             ('classification', {'rotation': [0], 'darkness': [-1], 'saturation': []}),
             ('classification', {'rotation': [0], 'darkness': [], 'saturation': [4]}),
-            ('classification', {'rotation': list(range(25)), 'darkness': [i/25 for i in range(25)], 'saturation': []}),
+            ('classification', {'rotation': list(range(25)), 'darkness': [i/25 for i in range(25)], 'saturation': [i/10 for i in range(9)]}),
             ('classification', {'rotation': [0], 'darkness': [], 'saturation': [], 'blur': [1]}),
             ('summarization', {'actions': []}),
             ('summarization', {'actions': ['unknown_function']}),

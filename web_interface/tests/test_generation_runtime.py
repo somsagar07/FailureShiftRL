@@ -68,6 +68,28 @@ class GenerationRuntimeTests(unittest.TestCase):
         self.assertEqual(metadata.get('generation_precision'), 'float32')
         self.assertEqual(metadata.get('generation_precision_requested'), 'auto')
         self.assertIs(evaluator.pipeline.text_encoder, evaluator.encoder.model)
+
+    def test_turbo_profile_disables_guidance_in_conditioning_and_rendering(self):
+        evaluator = self.evaluator()
+        runtime = evaluator._generation_runtime
+        runtime.guidance_scale = 0.
+        with patch.object(evaluator.pipeline, 'encode_prompt', wraps=evaluator.pipeline.encode_prompt) as encode:
+            runtime.render('a cat',steps=1,size=32,generator=torch.Generator().manual_seed(17))
+        flags=[call.kwargs['do_classifier_free_guidance'] for call in encode.call_args_list
+               if 'do_classifier_free_guidance' in call.kwargs]
+        self.assertEqual(flags,[False])
+        self.assertEqual(runtime.describe()['guidance_scale'],0.)
+
+    def test_local_turbo_manifest_retains_profile_after_folder_rename(self):
+        import json, shutil
+        path=Path(self.scratch.name)/'renamed-generator'
+        shutil.copytree(self.model['name'],path)
+        manifest=json.loads((path/'model_index.json').read_text())
+        manifest['_name_or_path']='stabilityai/sd-turbo'
+        (path/'model_index.json').write_text(json.dumps(manifest))
+        evaluator=dm.create_evaluator({**self.model,'name':str(path)},self.config,self.scratch.name)
+        self.addCleanup(evaluator.close)
+        self.assertEqual(evaluator._generation_runtime.guidance_scale,0.)
         self.assertTrue(all(parameter.dtype == torch.float32 for parameter in
                             evaluator.encoder.model.parameters()))
 

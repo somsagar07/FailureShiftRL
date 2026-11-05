@@ -376,6 +376,77 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(observed,[(threading.get_ident(),True)])
         self.assertTrue(all(torch.equal(value,pipeline.unet.state_dict()[key]) for key,value in original.state_dict().items()))
 
+    def test_training_desired_image_uses_exif_display_orientation(self):
+        desired=Path(self.scratch.name)/'desired-oriented.jpg'
+        image=Image.new('RGB',(64,32),'black')
+        image.paste('red',(0,0,64,16))
+        exif=Image.Exif()
+        exif[274]=6  # Display the stored raster rotated 90 degrees clockwise.
+        image.save(desired,exif=exif,quality=100,subsampling=0)
+
+        _,prepared,_,_,_=ft._generation(self.model(),[{'input':'a cat','target':str(desired)}],
+            ft._settings({'generation_size':32,'generation_framing':'center_crop'}),device='cpu')
+        pixels,_=prepared[0]
+
+        self.assertEqual(tuple(pixels.shape),(1,3,32,32))
+        # Displayed, then cropped to a square: black left half, red right half.
+        # Sample away from the JPEG boundary rather than expecting lossless RGB.
+        self.assertLess(float(pixels[0,0,10:22,2:10].mean()),-.95)
+        self.assertGreater(float(pixels[0,0,10:22,22:30].mean()),.95)
+
+    def test_training_preserves_full_reference_edges_by_default(self):
+        desired=Path(self.scratch.name)/'edge-objects.png'
+        image=Image.new('RGB',(128,64),'black')
+        image.paste('red',(0,0,24,64))
+        image.paste('blue',(104,0,128,64))
+        image.save(desired)
+        _,prepared,_,_,_=ft._generation(self.model(),[{'input':'a cat','target':str(desired)}],
+            ft._settings({'generation_size':64},task='generation'),device='cpu')
+        pixels,_=prepared[0]
+        self.assertGreater(pixels.shape[-1],pixels.shape[-2])
+        self.assertGreater(float(pixels[0,0,:,0:5].mean()),.9)
+        self.assertGreater(float(pixels[0,2,:,-5:].mean()),.9)
+        self.assertEqual(prepared.target_policy['framing'],'preserve')
+        self.assertEqual(prepared.target_policy['resolution'],64)
+
+    def test_training_automatic_resolution_uses_model_native_latent_size(self):
+        desired=Path(self.scratch.name)/'square.png'
+        Image.new('RGB',(80,80),'red').save(desired)
+        _,prepared,_,_,_=ft._generation(self.model(),[{'input':'a cat','target':str(desired)}],
+            ft._settings({},task='generation'),device='cpu')
+        pixels,_=prepared[0]
+        # Fixture latent size16 × VAE downsampling2 is a native32px model.
+        self.assertEqual(tuple(pixels.shape),(1,3,32,32))
+        self.assertEqual(prepared.target_policy['resolution_requested'],'auto')
+
+    def test_mixed_aspect_ratio_targets_train_one_effective_batch_without_cropping(self):
+        examples=[]
+        for name,size,color in [('wide',(128,64),'red'),('tall',(64,128),'blue')]:
+            desired=Path(self.scratch.name)/(name+'.png')
+            Image.new('RGB',size,color).save(desired)
+            examples.append({'input':'a cat','target':str(desired)})
+        seen=[]
+        original=AutoencoderKL.encode
+        def encode(model,pixels,*args,**kwargs):
+            seen.append(tuple(pixels.shape[-2:]))
+            return original(model,pixels,*args,**kwargs)
+        with patch.object(AutoencoderKL,'encode',encode),patch.object(ft,'_batch_sizes',return_value=(2,2)):
+            result=ft.fine_tune(self.model(),'generation',examples,Path(self.scratch.name)/'mixed-shapes',
+                {'generation_size':64,'batch_size':2,'epochs':1,'device':'cpu','seed':4},
+                lambda **fields:None,lambda:False)
+        self.assertEqual(result['steps'],1)
+        self.assertEqual(result['processed_examples'],2)
+        self.assertEqual(set(seen),{(48,88),(88,48)})
+        self.assertEqual(result['target_policy']['framing'],'preserve')
+        evaluator=self.evaluator(result['checkpoint'])
+        self.assertTrue((Path(self.scratch.name)/evaluator.predict('a cat')['image']).is_file())
+
+    def test_invalid_generation_target_settings_fail_before_loading_a_model(self):
+        for options in ({'generation_framing':'stretch'},{'generation_size':'native'},
+                        {'generation_size':True},{'generation_framing':None}):
+            with self.subTest(options=options),self.assertRaisesRegex(ValueError,'generation|framing'):
+                ft._settings(options,task='generation')
+
     def test_lora_changes_denoiser_saved_pipeline_reloads_and_original_unchanged(self):
         original=load_file(self.pipeline/'unet'/'diffusion_pytorch_model.safetensors')
         desired=Path(self.scratch.name)/'desired.png'
@@ -657,17 +728,18 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse((Path(self.scratch.name)/'checkpoint').exists())
 
     def test_training_cancellation_stops_preparing_desired_images(self):
+        import generation_targets
         desired=Path(self.scratch.name)/'desired.png'
         Image.new('RGB',(32,32),'red').save(desired)
         prepared=[]
         cancelled=[False]
-        fit=ImageOps.fit
+        prepare_image=generation_targets.prepare_target_image
         def prepare(*args,**kwargs):
-            result=fit(*args,**kwargs)
+            result=prepare_image(*args,**kwargs)
             prepared.append(result)
             cancelled[0]=True
             return result
-        with patch.object(ImageOps,'fit',prepare):
+        with patch.object(generation_targets,'prepare_target_image',prepare):
             with self.assertRaises(InterruptedError):
                 ft.fine_tune(self.model(),'generation',[{'input':'a cat','target':str(desired)}]*3,
                     Path(self.scratch.name)/'training',{'generation_size':32},

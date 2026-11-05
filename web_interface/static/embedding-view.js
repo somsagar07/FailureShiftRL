@@ -356,10 +356,12 @@ class EmbeddingView {
         ctx.beginPath();
         ctx.moveTo(original.x, original.y);
         ctx.lineTo(node.x, node.y);
-        ctx.strokeStyle = '#a57143';
+        ctx.strokeStyle = node.data.pending ? '#9aa1a9' : '#a57143';
+        ctx.setLineDash(node.data.pending ? [4, 3] : []);
         ctx.lineWidth = node.selected ? 2 : 1;
         ctx.globalAlpha = node.selected ? 0.8 : 0.35;
         ctx.stroke();
+        ctx.setLineDash([]);
       }
     }
     for (const node of this.projected) {
@@ -371,9 +373,9 @@ class EmbeddingView {
       // Keep the missing-SD boundary visible even when selected or pulsing.
       const unknownVariation = this.discovery && node.kind === 'action' && !this.actionRadii.has(node.data.id);
       const selectedSample = node.selected && node.kind === 'sample';
-      ctx.strokeStyle = unknownVariation ? '#7c3aed' : selectedSample ? '#202a35' : '#ffffff';
+      ctx.strokeStyle = node.data.pending ? '#7d8792' : unknownVariation ? '#7c3aed' : selectedSample ? '#202a35' : '#ffffff';
       ctx.lineWidth = unknownVariation ? 2 : selectedSample ? 2.5 : 1.5;
-      ctx.setLineDash(unknownVariation ? [2, 2] : []);
+      ctx.setLineDash(node.data.pending ? [4, 3] : unknownVariation ? [2, 2] : []);
       ctx.stroke();
       ctx.setLineDash([]);
       if(this.landscapeMode==='predicted'&&this.discovery?.predicted_landscape) {

@@ -8,16 +8,22 @@ import shutil
 import tempfile
 from contextlib import ExitStack
 from functools import lru_cache
-from itertools import islice
+from itertools import groupby, islice
 from pathlib import Path
 
 from discovery_models import ClassificationEvaluator, load_diffusion
 from text_encoders import SummarizationEncoder, _encoder_device
+from training_settings import LEARNING_RATES
 
 
-def _settings(settings):
-    result={'epochs':1,'learning_rate':1e-4,'seed':0,'batch_size':'auto','generation_size':256,'device':'auto',
+def _settings(settings,task=None):
+    result={'epochs':1,'learning_rate':LEARNING_RATES.get(task,1e-4),'seed':0,'batch_size':'auto',
+            'generation_size':'auto' if task=='generation' else 256,'device':'auto',
             'weight_decay':.01,'max_grad_norm':1.,**settings}
+    if task=='generation' or 'generation_framing' in result:
+        result.setdefault('generation_framing','preserve')
+        if result['generation_framing'] not in ('preserve','center_crop'):
+            raise ValueError('generation_framing must be preserve or center_crop.')
     if not isinstance(result['device'],str) or result['device'] not in ('auto','cpu','cuda'):
         raise ValueError('Choose a fine-tuning device: auto, cpu, or cuda.')
     batch=result['batch_size']
@@ -25,6 +31,8 @@ def _settings(settings):
         raise ValueError('batch_size must be auto or an integer from 1 to 1024.')
     for key,low,high in [('epochs',1,100),('seed',0,2**32-1),('generation_size',32,1024)]:
         value=result[key]
+        if key=='generation_size' and task=='generation' and value=='auto':
+            continue
         if isinstance(value,bool) or not isinstance(value,int) or not low<=value<=high:
             raise ValueError(f'{key} must be an integer from {low} to {high}.')
     rate=result['learning_rate']
@@ -34,7 +42,7 @@ def _settings(settings):
         value=result[key]
         if isinstance(value,bool) or not isinstance(value,(int,float)) or not 0<=value<=high or not math.isfinite(value):
             raise ValueError(f'{key} must be finite and from 0 to {high:g}.')
-    if result['generation_size']%8:
+    if result['generation_size']!='auto' and result['generation_size']%8:
         raise ValueError('generation_size must be a multiple of eight.')
     return result
 
@@ -96,6 +104,8 @@ class _PreparedExamples:
 def _classifier(model,examples,directory,cancelled=lambda:False,*,device='cpu',validated=lambda count:None):
     from PIL import Image
     adapter=ClassificationEvaluator(model,{'task':'classification','device':'cpu'},directory)
+    if adapter.is_clip:
+        raise ValueError('CLIP currently supports Analyze and Find failure. Zero-shot CLIP adaptation is not enabled yet.')
     groups={}
     counts={'single_class':0,'groups':{}}
     num_labels=adapter.model.config.num_labels
@@ -150,13 +160,17 @@ def _classifier(model,examples,directory,cancelled=lambda:False,*,device='cpu',v
 
 def _summarizer(model,examples,cancelled=lambda:False,*,device='cpu',validated=lambda count:None):
     adapter=SummarizationEncoder({**model,'device':'cpu'})
-    limits=[getattr(adapter.tokenizer,'model_max_length',None)]
+    if adapter.is_causal:
+        raise ValueError('Instruction LMs currently support Analyze and Find failure. Adapt supports encoder-decoder summarizers; causal-LM adaptation is not enabled yet.')
+    # Tokenizer/encoder limits bound source inputs, not decoder targets. Models
+    # with relative positions still need an application bound on target length.
+    limits=[]
     for config in (adapter.model.config,adapter.model.get_decoder().config):
         limits.extend(getattr(config,name,None) for name in
                       ('max_position_embeddings','max_decoder_position_embeddings','max_target_positions','n_positions'))
     limits=[int(value) for value in limits if isinstance(value,(int,float)) and
             math.isfinite(value) and 0<value<10**9 and int(value)==value]
-    output_limit=min(2048,min(limits) if limits else adapter.max_tokens)
+    output_limit=min([2048,*limits])
 
     def labels_for(target):
         if not isinstance(target,str) or not target.strip():
@@ -211,11 +225,20 @@ def _pad_batch(torch,examples,pad_token_id,labels_pad=-100):
 def _generation(model,examples,settings,cancelled=lambda:False,*,device='cpu',validated=lambda count:None):
     import numpy as np
     import torch
-    from PIL import Image,ImageOps
+    from PIL import Image
     from diffusers import DDPMScheduler
     from peft import LoraConfig
+    from generation_targets import prepare_target_image, target_dimensions, MAX_IMAGE_PIXELS
     pipeline,revision=load_diffusion(model)
-    size=settings['generation_size']
+    requested_size=settings['generation_size']
+    size=requested_size
+    if size=='auto':
+        latent_size=pipeline.unet.config.sample_size
+        if type(latent_size) is not int:
+            raise ValueError('The model does not declare a square native size; choose generation_size explicitly.')
+        size=latent_size*pipeline.vae_scale_factor
+    framing=settings.get('generation_framing','preserve')
+    target_dimensions(1,1,size,framing)
 
     def desired_path(target):
         if not isinstance(target,str):
@@ -229,8 +252,18 @@ def _generation(model,examples,settings,cancelled=lambda:False,*,device='cpu',va
         # Verify every desired image before any update, without resizing it into
         # a retained training tensor or decoding augmented classifier inputs.
         try:
-            with Image.open(desired_path(target)) as image:
+            path=desired_path(target)
+            with Image.open(path) as image:
+                if image.width*image.height>MAX_IMAGE_PIXELS:
+                    raise ValueError('Desired training images must be at most 20 megapixels.')
+                width,height=image.size
                 image.verify()
+            # PNG EXIF access can decode pixels and invalidate verify(). Read
+            # orientation only after a separate header/readability check.
+            with Image.open(path) as image:
+                if image.getexif().get(274) in (5,6,7,8):
+                    width,height=height,width
+                target_dimensions(width,height,size,framing)
         except (OSError,SyntaxError) as exc:
             raise ValueError('Reviewed desired image must be a readable image.') from exc
 
@@ -238,9 +271,11 @@ def _generation(model,examples,settings,cancelled=lambda:False,*,device='cpu',va
         caption=example['input']
         if not isinstance(caption,str) or not caption.strip():
             raise ValueError('Generation training requires captions and explicit desired-image absolute paths.')
-        with Image.open(desired_path(example['target'])) as image:
-            image=ImageOps.fit(image.convert('RGB'),(size,size),method=Image.Resampling.LANCZOS)
+        image,_=prepare_target_image(desired_path(example['target']),size,framing)
+        try:
             pixels=torch.from_numpy(np.asarray(image,dtype=np.float32).copy()).permute(2,0,1).unsqueeze(0)/127.5-1
+        finally:
+            image.close()
         tokens=pipeline.tokenizer(caption,padding='max_length',truncation=False,return_tensors='pt',verbose=False)
         if tokens['input_ids'].shape[-1]>min(pipeline.tokenizer.model_max_length,pipeline.text_encoder.config.max_position_embeddings):
             raise ValueError('Training caption exceeds diffusion model token limit.')
@@ -259,7 +294,12 @@ def _generation(model,examples,settings,cancelled=lambda:False,*,device='cpu',va
     scheduler=DDPMScheduler.from_config(pipeline.scheduler.config)
     if scheduler.config.prediction_type not in ('epsilon','v_prediction'):
         raise ValueError('Only epsilon or v_prediction diffusion training is supported.')
-    return pipeline,_PreparedExamples(examples,prepare,cancelled),trainable,scheduler,revision
+    prepared=_PreparedExamples(examples,prepare,cancelled)
+    prepared.target_policy=dict(framing=framing,resolution_requested=requested_size,resolution=size,
+        policy='Full EXIF-oriented image with approximate aspect ratio: dimensions are independently rounded '
+               'to multiples of eight, which can slightly stretch the scene.'
+               if framing=='preserve' else 'EXIF-oriented image center-cropped to the selected square resolution.')
+    return pipeline,prepared,trainable,scheduler,revision
 
 
 def _batch_sizes(settings,task,device,count):
@@ -321,11 +361,18 @@ def _backward_chunk(torch,prepared,indices,loss_for,effective_count,cancelled):
     # traceback is discarded before empty_cache and a smaller replay begins.
     chosen=[prepared[index] for index in indices]
     _check(cancelled)
-    loss,weight=loss_for(chosen)
-    if not torch.isfinite(loss):
-        raise ValueError('Training produced a nonfinite loss; no checkpoint saved.')
-    (loss*(weight/effective_count)).backward()
-    return float(loss.detach())*weight,weight
+    key=getattr(loss_for,'group_key',None)
+    groups=(list(group) for _,group in groupby(chosen,key)) if key else (chosen,)
+    numerator=denominator=0
+    for group in groups:
+        _check(cancelled)
+        loss,weight=loss_for(group)
+        if not torch.isfinite(loss):
+            raise ValueError('Training produced a nonfinite loss; no checkpoint saved.')
+        (loss*(weight/effective_count)).backward()
+        numerator+=float(loss.detach())*weight
+        denominator+=weight
+    return numerator,denominator
 
 
 def _accumulate(torch,prepared,indices,micro_size,loss_for,trainable,cancelled):
@@ -368,10 +415,12 @@ def fine_tune(model,task,examples,directory,settings,progress,cancelled):
 
     Batch size is effective examples per optimizer update. The microbatch size
     can shrink without changing that update's examples or target weighting.
+    Progress and saved training loss weight update means by completed examples,
+    including short final batches, across all epochs.
     Training loss is not a held-out evaluation or evidence of improvement.
     """
     import torch
-    settings=_settings(settings)
+    settings=_settings(settings,task=task)
     _examples(examples)
     _check(cancelled)
     if task not in ('classification','summarization','generation'):
@@ -422,6 +471,7 @@ def fine_tune(model,task,examples,directory,settings,progress,cancelled):
                             'Source text and target summaries must fit the model token limits.'))
             else:
                 pipeline,prepared,trainable,scheduler,revision=_generation(model,examples,settings,cancelled,device=device,validated=validated)
+                objective['target_policy']=prepared.target_policy
             _check(cancelled)
             optimizer=torch.optim.AdamW(trainable,lr=settings['learning_rate'],weight_decay=settings['weight_decay'])
             rng=random.Random(settings['seed'])
@@ -453,6 +503,11 @@ def fine_tune(model,task,examples,directory,settings,progress,cancelled):
                 prediction=pipeline.unet(noisy,timesteps,encoder_hidden_states=condition).sample
                 target=noise if scheduler.config.prediction_type=='epsilon' else scheduler.get_velocity(latents,noise,timesteps)
                 return torch.nn.functional.mse_loss(prediction.float(),target.float()),len(chosen)
+
+            if pipeline is not None:
+                # Different reference aspect ratios share an effective update,
+                # but cannot be concatenated into the same image tensor.
+                loss_for.group_key=lambda example:tuple(example[0].shape[-2:])
 
             mean_loss=0.
             for epoch in range(settings['epochs']):
@@ -496,11 +551,11 @@ def fine_tune(model,task,examples,directory,settings,progress,cancelled):
                             raise ValueError('CUDA ran out of memory during the optimizer update, which may be partial and was not retried. Free GPU memory, use a smaller model, or select CPU; no checkpoint was saved.') from exc
                         raise
                     steps+=1
-                    mean_loss+=(loss-mean_loss)/steps
                     status['processed_examples']+=len(indices)
-                    emit('training reviewed examples',loss=loss)
+                    mean_loss+=(loss-mean_loss)*len(indices)/status['processed_examples']
+                    emit('training reviewed examples',loss=mean_loss)
             _check(cancelled)
-            emit('saving separate checkpoint',loss=loss)
+            emit('saving separate checkpoint',loss=mean_loss)
             _check(cancelled)
             staging=Path(tempfile.mkdtemp(prefix='.checkpoint-',dir=destination))
             if pipeline is None:

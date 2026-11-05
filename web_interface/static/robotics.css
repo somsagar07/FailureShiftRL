@@ -1,0 +1,174 @@
+.robotics-workspace { display: grid; grid-template-columns: 330px minmax(0,1fr); gap: 30px; align-items: start; margin-top: 25px; }
+.robotics-workspace h2 { margin-top: 24px; }
+.robotics-workspace h2:first-child { margin-top: 0; }
+.robotics-workspace .hint { overflow-wrap: anywhere; }
+.robotics-workspace progress { display: block; width: 100%; height: 8px; accent-color: #42688e; }
+.robotics-workspace input, .robotics-workspace select, .robotics-workspace textarea { min-width: 0; }
+.robotics-runtime { margin-bottom: 18px; padding: 9px 11px; border-left: 3px solid #c2ced9; background: #f6f8fa; }
+.robotics-runtime .hint { margin: 0; }
+#robotics-runtime-command { margin-top: 8px; font: 11px/1.5 ui-monospace,monospace; white-space: pre-wrap; }
+.robotics-runtime-unavailable { color: #875a22; }
+#robotics-runtime-retry { margin-top: 9px; font-size: 12px; }
+.robotics-two-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.robotics-two-columns label { font-size: 12px; }
+.robotics-two-columns input, .robotics-two-columns select { margin-top: 5px; font-size: 13px; }
+.robotics-options { margin: 14px 0; padding-top: 12px; border-top: 1px solid #e2e5e8; }
+.robotics-options summary { cursor: pointer; font-size: 12px; }
+#robotics-load-environment { width: 100%; }
+#robotics-environment-status { margin: 7px 0 15px; }
+.robotics-starter-controls { display: flex; gap: 7px; align-items: center; }
+.robotics-starter-controls select { flex: 1; width: 0; }
+.robotics-starter-controls button { flex: none; padding: 8px 10px; font-size: 12px; }
+#robotics-starter-status, #robotics-starter-details { margin: 7px 0 11px; }
+#robotics-starter-details { padding: 9px 10px; border-left: 2px solid #b9cbdc; background: #f6f8fa; white-space: pre-line; }
+.robotics-mapping-help code { font-size: 11px; }
+.robotics-mapping-help p { margin: 7px 0; }
+#robotics-mapping { font: 12px/1.5 ui-monospace,monospace; }
+.robotics-policy-notes { margin: 12px 0; border: 1px solid #e2d4b4; border-radius: 4px; background: #fffaf0; color: #76591c; font-size: 12px; }
+.robotics-policy-notes summary { padding: 8px 10px; cursor: pointer; }
+.robotics-policy-notes ul { max-height: 190px; overflow: auto; margin: 0 10px 10px; padding-left: 17px; overflow-wrap: anywhere; }
+.robotics-policy-notes li + li { margin-top: 7px; }
+#robotics-choose-folder { margin-top: 12px; width: 100%; font-size: 12px; }
+#robotics-action-add, #robotics-reset-actions { font-size: 12px; }
+#robotics-action-count { margin-bottom: 8px; }
+.robotics-value-title { font-size: 12px; font-weight: 500; margin: 0 0 9px; }
+.robotics-value-options { display: flex; flex-wrap: wrap; gap: 7px; }
+.robotics-value-options .robotics-value-option { display: flex; align-items: center; gap: 5px; margin: 0; padding: 5px 7px; border: 1px solid #dce3e9; border-radius: 4px; background: white; cursor: pointer; }
+.robotics-value-option input { margin: 0; }
+.robotics-checkbox { display: flex; gap: 7px; align-items: flex-start; font-size: 12px; }
+.robotics-checkbox input { margin-top: 3px; flex: none; }
+.robotics-results { min-width: 0; }
+.robotics-results-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.robotics-results-heading h2 { margin: 0; }
+.robotics-results-heading .hint { margin: 3px 0 0; }
+.robotics-run-buttons { display: flex; flex-wrap: wrap; gap: 7px; }
+.robotics-run-buttons button { padding: 8px 12px; font-size: 12px; }
+#robotics-discover:not(:disabled) { background: #303030; color: white; border-color: #303030; }
+#robotics-discover:not(:disabled):hover { background: #111; }
+.robotics-job-status { margin: 18px 0; }
+#robotics-status { margin: 0 0 5px; overflow-wrap: anywhere; }
+#robotics-step-status:empty { display: none; }
+#robotics-stale { padding: 8px 10px; color: #76591c; background: #fff9e9; border-left: 2px solid #d8c28f; }
+.robotics-environment-summary { margin: 0 0 18px; padding: 15px; border: 1px solid #dde4eb; border-radius: 6px; background: #fafbfc; }
+#robotics-environment-details { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+#robotics-environment-stale { padding: 8px 10px; color: #76591c; background: #fff9e9; border-left: 2px solid #d8c28f; }
+#robotics-environment-preview { margin: 14px 0 0; }
+#robotics-environment-image { display: block; width: 100%; min-height: 180px; max-height: 480px; object-fit: contain; }
+#robotics-environment-caption { margin: 8px 0 0; }
+#robotics-environment-observations { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 7px 12px; font: 11px/1.5 ui-monospace,monospace; overflow-wrap: anywhere; }
+#robotics-environment-observations dt, #robotics-environment-observations dd { margin: 0; }
+.robotics-metrics { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; margin-bottom: 18px; }
+.robotics-metrics section { min-width: 0; padding: 10px 12px; border: 1px solid #e0e6eb; border-radius: 5px; background: #fafbfc; }
+.robotics-metrics h3 { margin: 0 0 7px; color: #526173; font-size: 11px; font-weight: 500; }
+.robotics-metric { margin: 0; font-size: 22px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+#robotics-paired { font-size: 15px; }
+.robotics-metrics .hint { margin: 4px 0 0; font-size: 10px; }
+.robotics-graph-wrap { overflow: hidden; min-width: 0; border: 1px solid #dde4eb; border-radius: 8px; background: #f8fafc; }
+.robotics-graph-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid #e7ecf1; }
+.robotics-graph-toolbar .hint { margin: 0; }
+.robotics-graph-toolbar button { flex: none; font-size: 11px; background: white; border-color: #d8e0e8; }
+.robotics-graph-buttons { display: flex; align-items: center; gap: 4px; flex: none; }
+#robotics-graph-zoom { min-width: 37px; text-align: center; font-size: 10px; }
+#robotics-graph { display: block; width: 100%; height: clamp(300px,42vw,470px); cursor: grab; touch-action: none; user-select: none; }
+#robotics-graph:focus-visible { outline: 2px solid #5481ab; outline-offset: -3px; }
+#robotics-baseline-errors { margin-top: 12px; color: #8b2828; font-size: 12px; overflow-wrap: anywhere; }
+#robotics-baseline-errors summary { cursor: pointer; }
+#robotics-baseline-errors ul { padding-left: 18px; }
+#robotics-graph-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 280px; padding: 25px; text-align: center; color: #526173; }
+#robotics-graph-empty p { margin: 4px 0; }
+.robotics-legend { display: flex; flex-wrap: wrap; gap: 6px 17px; padding: 8px 13px 0; margin: 0; list-style: none; color: #526173; font-size: 10px; }
+.robotics-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.robotics-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.robotics-unmeasured { background: #a7afb8; }
+.robotics-untested { background: #a7afb8; outline: 1px dashed #7d8792; outline-offset: 2px; }
+.robotics-success { background: #46975f; }
+.robotics-failure { background: #d53334; }
+.robotics-error-dot { background: #9a72bc; }
+.robotics-current { background: #a7afb8; outline: 2px solid #2d609d; outline-offset: 1px; }
+.robotics-coordinate-note { margin: 10px 13px 12px; color: #708093; font-size: 10px; }
+.robotics-live { margin: 18px 0; padding: 12px; border: 1px solid #dde4eb; border-radius: 6px; background: #fafbfc; }
+.robotics-live img { display: block; width: 100%; max-height: 250px; object-fit: contain; }
+.robotics-live figcaption { margin: 8px 0 0; }
+.robotics-inspector { margin-top: 18px; padding: 14px 16px; border: 1px solid #ddd; border-radius: 5px; }
+.robotics-inspector > label { margin-top: 0; font-size: 12px; }
+#robotics-inspect { font-size: 12px; }
+#robotics-selected-outcome { margin: 10px 0 5px; font-size: 13px; }
+#robotics-selected-values, #robotics-selected-note { margin-bottom: 7px; }
+.robotics-replays { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.robotics-replays section { min-width: 0; }
+.robotics-replays h4 { margin: 12px 0 6px; font-size: 12px; font-weight: 500; }
+.robotics-replays img, .robotics-replays video { display: block; width: 100%; max-height: 260px; object-fit: contain; background: #f5f7f9; border-radius: 4px; }
+.robotics-replays .report-link { margin-top: 5px; }
+.robotics-table-wrap { overflow-x: auto; margin-top: 12px; }
+.robotics-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.robotics-table-wrap th { text-align: left; font-weight: 500; color: #526173; }
+.robotics-table-wrap th, .robotics-table-wrap td { padding: 8px 6px; border-bottom: 1px solid #e4e9ee; vertical-align: top; overflow-wrap: anywhere; }
+.robotics-table-wrap th:first-child, .robotics-table-wrap td:first-child { padding-left: 0; }
+.robotics-artifacts { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.robotics-workspace a { color: #214f7b; }
+@media(max-width: 1200px) {
+  .robotics-workspace { grid-template-columns: 290px minmax(0,1fr); gap: 20px; }
+  .robotics-metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .robotics-metrics section:last-child { grid-column: 1 / -1; }
+}
+@media(max-width: 900px) {
+  .robotics-workspace { grid-template-columns: minmax(0,1fr); gap: 25px; }
+  #robotics-form { border-right: 0; border-bottom: 1px solid #ddd; padding: 0 0 20px; }
+  .robotics-metrics { grid-template-columns: 1fr 1fr 1.2fr; }
+  .robotics-metrics section:last-child { grid-column: auto; }
+}
+@media(max-width: 520px) {
+  .robotics-metrics { grid-template-columns: 1fr 1fr; }
+  .robotics-metrics section:last-child { grid-column: 1 / -1; }
+  .robotics-replays { grid-template-columns: 1fr; }
+  .robotics-inspector { padding: 12px; }
+  .robotics-graph-toolbar { align-items: flex-start; }
+  #robotics-graph-empty { min-height: 200px; }
+}
+
+.robotics-search-panel { margin-top: 16px; padding: 15px 17px; border: 1px solid #c6d6e5; border-radius: 6px; background: #f7fafc; }
+.robotics-search-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.robotics-search-heading h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.robotics-search-heading button { border: 0; background: transparent; font-size: 22px; padding: 0 5px; }
+.robotics-search-panel > .hint { margin: 6px 0 12px; }
+.robotics-search-panel label { font-size: 12px; }
+.robotics-search-panel .robotics-options { margin-bottom: 10px; }
+.robotics-search-panel .primary { margin-top: 3px; font-size: 12px; padding: 9px 14px; }
+.robotics-search-progress { margin: 0 0 16px; padding: 11px 12px; border: 1px solid #dce5ed; border-radius: 5px; background: #f6f9fc; }
+.robotics-search-progress dl { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 10px; margin: 0; }
+.robotics-search-progress dt { font-size: 10px; color: #526173; }
+.robotics-search-progress dd { margin: 5px 0 0; font: 13px/1.4 ui-monospace,monospace; overflow-wrap: anywhere; }
+.robotics-search-progress .hint { margin: 9px 0 0; font-size: 10px; }
+.robotics-landscape-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 9px 13px; }
+.robotics-landscape-controls label { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 10px; }
+.robotics-landscape-controls select { width: auto; max-width: 100%; margin: 0; padding: 5px; font-size: 11px; }
+.robotics-landscape-controls .hint { flex: 1 1 200px; margin: 0; font-size: 10px; }
+#robotics-episode { font-size: 12px; }
+@media(max-width: 1200px) { .robotics-search-progress dl { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@media(max-width: 520px) {
+  .robotics-search-panel { padding: 12px; }
+  .robotics-graph-toolbar { flex-wrap: wrap; }
+  #robotics-graph { height: 320px; }
+  .robotics-inspector > .robotics-two-columns { grid-template-columns: minmax(0,1fr); }
+  .robotics-landscape-controls label { max-width: 100%; }
+}
+
+/* Keep exploration and inspection in the same places as the other workspaces. */
+.robotics-graph-layout { display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; align-items: start; }
+.robotics-graph-layout:has(> .robotics-inspector:not([hidden])) { grid-template-columns: minmax(0,1fr) 280px; }
+.robotics-graph-column { min-width: 0; }
+.robotics-graph-column > .robotics-run-buttons { justify-content: flex-end; margin: 10px 0; }
+.robotics-graph-layout > .robotics-inspector { margin-top: 0; min-width: 0; }
+.robotics-inspector > h3 { margin: 0 0 12px; font-size: 15px; font-weight: 500; }
+.robotics-inspector > .robotics-two-columns, .robotics-inspector .robotics-replays { grid-template-columns: minmax(0,1fr); }
+.robotics-graph-layout > .robotics-search-panel { grid-column: 1 / -1; margin-top: 0; border-right: 1px solid #c6d6e5; }
+.robotics-graph-column .robotics-graph-toolbar { flex-wrap: wrap; }
+#robotics-finetune:disabled { cursor: not-allowed; opacity: .5; }
+@media(max-width: 1250px) {
+  .robotics-graph-layout:has(> .robotics-inspector:not([hidden])) { grid-template-columns: minmax(0,1fr); }
+  .robotics-inspector .robotics-replays { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media(max-width: 520px) {
+  .robotics-inspector .robotics-replays { grid-template-columns: minmax(0,1fr); }
+}
+.robotics-graph-layout > .robotics-search-progress, .robotics-graph-layout > .robotics-live { grid-column: 1 / -1; margin: 0; }
