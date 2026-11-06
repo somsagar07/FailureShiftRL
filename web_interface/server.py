@@ -26,6 +26,7 @@ from discovery import DiscoveryManager
 from model_loading import prepare_analysis_model, _safe_relative_path
 from working_storage import BoundedCache, budget_bytes
 from robotics import RoboticsManager, CHUNK_BYTES as POLICY_CHUNK_BYTES
+from detection_workspace import DetectionManager
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TEXT = ('A university research team tested a new water filter in three villages. '
@@ -293,6 +294,7 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
     discoveries = DiscoveryManager(previews, embeddings, previews.directory.parent/'discoveries',
                                    evaluator_factory=evaluator_factory, finetune_fn=finetune_fn)
     robotics = RoboticsManager(previews.directory.parent/'robotics', runner=robotics_runner)
+    detection = DetectionManager(previews.datasets, previews.directory.parent/'detection')
     class Handler(BaseHTTPRequestHandler):
         def send(self, status, body, kind='application/json'):
             if isinstance(body, (dict, list)):
@@ -328,6 +330,12 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
             path = unquote(urlsplit(self.path).path)
             query = parse_qs(urlsplit(self.path).query)
             try:
+                match = re.fullmatch(r'/api/detection/jobs/([0-9a-f]{32})', path)
+                if match:
+                    return self.send(200, detection.get(match[1]))
+                match = re.fullmatch(r'/api/detection/jobs/([0-9a-f]{32})/images/(\d+)/(original|action-\d+)', path)
+                if match:
+                    return self.send(200, detection.image(match[1], int(match[2]), match[3]), 'image/png')
                 if path == '/api/robotics/catalog':
                     return self.send(200, robotics.catalog())
                 if path == '/api/robotics/starter-policies':
@@ -405,6 +413,7 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                           '/embedding-view.js':'embedding-view.js', '/embedding-controller.js':'embedding-controller.js',
                           '/adaptation-controller.js':'adaptation-controller.js',
                           '/robotics-controller.js':'robotics-controller.js', '/robotics.css':'robotics.css',
+                          '/detection-controller.js':'detection-controller.js', '/detection.css':'detection.css',
                           '/discovery-controller.js':'discovery-controller.js', '/style.css': 'style.css'}
                 if path in static:
                     file = ROOT/'static'/static[path]
@@ -439,6 +448,14 @@ def create_server(port=8000, directory=None, *, evaluator_factory=None, finetune
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                     return self.send(415, {'error': 'Send application/json.'})
                 data = json.loads(self.rfile.read(length))
+                if path == '/api/detection/analyze':
+                    return self.send(202, detection.analyze(data))
+                if path == '/api/detection/discover':
+                    return self.send(202, detection.discover(data))
+                if path == '/api/detection/expand':
+                    return self.send(202, detection.expand(data))
+                if path == '/api/detection/inspect':
+                    return self.send(202, detection.inspect(data))
                 if path == '/api/robotics/policies':
                     return self.send(201, robotics.create_upload(data))
                 if path == '/api/robotics/runs':

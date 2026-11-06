@@ -216,6 +216,7 @@ def check_environment(quiet=False, require_cuda=False):
         ('numpy', 'numpy', ('linalg', 'array')),
         ('torch', 'torch', ('inference_mode', 'Tensor')),
         ('torchvision', 'torchvision', ('transforms', 'ops')),
+        ('timm', 'timm', ('create_model',)),
         ('transformers', 'transformers', ('AutoImageProcessor', 'AutoModel', 'AutoTokenizer', 'AutoModelForSeq2SeqLM', 'AutoModelForImageClassification', 'AutoModelForSequenceClassification', 'CLIPModel', 'CLIPTextModel', 'CLIPTokenizer', 'Qwen3VLProcessor', 'Qwen3VLForConditionalGeneration', 'BlipProcessor', 'BlipForQuestionAnswering')),
         ('sentencepiece', 'sentencepiece', ('SentencePieceProcessor',)),
         ('protobuf', 'google.protobuf', ('__version__',)),

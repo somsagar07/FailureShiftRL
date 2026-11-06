@@ -9,6 +9,8 @@ numpy>=1.26,<3
 torch>=2.6,<3
 # setup.sh selects the build matching the installed PyTorch/CUDA runtime.
 torchvision>=0.21,<1
+# DETR's ResNet backbone uses timm.
+timm>=1,<2
 transformers>=4.57,<5
 sentencepiece>=0.2,<0.3
 protobuf>=4.25,<7

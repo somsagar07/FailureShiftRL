@@ -118,6 +118,22 @@ failure criteria are automated review signals. LAYA's primary release handles
 text decisions, and the separate community LAYA-Vision extension needs a custom
 adapter; neither is advertised as a supported image classifier here.
 
+## Object detection workspace
+
+Choose the DETR preset or a compatible local or Hugging Face detector, then
+load a local image folder or an image dataset. The dataset presets include
+COCO, Oxford Pets, and CPPE-5; they default to 20 images. Analyze projects
+pooled detector features into the 3D search space. Select an image to expand
+darkness and saturation combinations, then select a combination to inspect
+the predicted boxes and labels. Find failures runs the existing terminal DQN
+against the enabled combinations. Fine-tuning is not available here yet.
+
+The loader resizes images to 224 × 224 pixels. Detection scores compare the
+transformed image with the detector's original predictions; dataset bounding
+boxes are not loaded or used as ground truth. A changed prediction is a review
+candidate, not a confirmed detection error, and newly added detections are
+reported separately from the baseline-referenced severity score.
+
 ## Robosuite workspace
 
 The optional robotics runtime is installed separately from the app and Vev. It

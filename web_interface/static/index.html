@@ -7,12 +7,14 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/robotics.css">
+  <link rel="stylesheet" href="/detection.css">
   <script src="/graph.js" defer></script>
   <script src="/embedding-view.js" defer></script>
   <script src="/embedding-controller.js" defer></script>
   <script src="/adaptation-controller.js" defer></script>
   <script src="/discovery-controller.js" defer></script>
   <script src="/robotics-controller.js" defer></script>
+  <script src="/detection-controller.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body id="workspace-shell" data-sidebar-collapsed="false">
@@ -26,6 +28,7 @@
     <h2 class="workspace-label">Workspace</h2>
     <nav aria-label="Workspace domains">
       <button type="button" class="domain active" data-task="classification" aria-label="Image classification" aria-current="page" title="Image classification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m4 18 5-5 4 4 3-3 5 5"/></svg><span class="domain-label">Image classification</span></button>
+      <button type="button" class="domain" data-task="detection" aria-label="Object detection" title="Object detection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 8V3h5m8 0h5v5M3 16v5h5m8 0h5v-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span class="domain-label">Object detection</span></button>
       <button type="button" class="domain" data-task="summarization" aria-label="Summarization" title="Summarization"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14M5 8h14M5 12h9M5 17h6m-3-3 3 3-3 3"/></svg><span class="domain-label">Summarization</span></button>
       <button type="button" class="domain" data-task="generation" aria-label="Image generation" title="Image generation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M14 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-9M4 18l5-5 4 4 3-3 4 4M18 1l1.2 3.8L23 6l-3.8 1.2L18 11l-1.2-3.8L13 6l3.8-1.2Z"/></svg><span class="domain-label">Image generation</span></button>
       <button type="button" class="domain" data-task="robotics" aria-label="Robosuite" title="Robosuite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 21h16M7 21v-4l5-5m0 0L7 7m5 5 5-5M5 4l3-2 3 3-3 3ZM16 4h5v5l-3 2-3-3"/><circle cx="12" cy="12" r="2.5"/></svg><span class="domain-label">Robosuite</span></button>
@@ -395,6 +398,7 @@
         </div>
       </section>
     </div>
+    <section id="detection-workspace" aria-label="Object detection workspace" hidden></section>
     <section id="robotics-workspace" class="robotics-workspace" aria-label="Robosuite workspace" hidden>
       <form id="robotics-form">
         <div class="robotics-runtime">

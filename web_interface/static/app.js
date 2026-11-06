@@ -57,7 +57,7 @@ const generationInput={dataset:null,loading:false,options:null,optionsLoading:fa
 let catalog, task='classification', preview=null, busy=false;
 // Robotics owns its catalog and jobs. Keep the last legacy task intact so late
 // dataset callbacks and returning to that workspace preserve their context.
-let workspaceTask='classification', robotics=null, legacyInitialized=false;
+let workspaceTask='classification', robotics=null, detection=null, legacyInitialized=false;
 let previewRequest=0,previewTimer=null;
 let dataset=null, datasetLoading=false, imageIndex=0, imageOffset=0, imageItems=[];
 let pageRequest=0, pageLoading=false;
@@ -122,7 +122,7 @@ function usesSummaryDataset() {return task==='summarization'&&$('summary-source'
 function usesGenerationDataset() {return task==='generation'&&$('generation-source').value!=='text';}
 function activeTextDataset() {return usesSummaryDataset()?summaryInput:usesGenerationDataset()?generationInput:null;}
 function updateControls() {
-  if(workspaceTask==='robotics') {
+  if(workspaceTask==='robotics'||workspaceTask==='detection') {
     document.querySelectorAll('.domain').forEach(button=>button.disabled=busy||datasetLoading||summaryInput.loading||generationInput.loading);
     return;
   }
@@ -233,9 +233,18 @@ $('action-add').addEventListener('change',()=>{
   clearPreview();renderActions();(task==='summarization'?$(`remove-action-${key}`):$(`edit-action-${key}`)).focus();
 });
 function setTask(next) {
-  const returningFromRobotics=workspaceTask==='robotics';
+  const returningFromRobotics=workspaceTask==='robotics'||workspaceTask==='detection';
   workspaceTask=next;
-  show('workspace-layout',next!=='robotics');show('robotics-workspace',next==='robotics');
+  show('workspace-layout',next!=='robotics'&&next!=='detection');show('robotics-workspace',next==='robotics');show('detection-workspace',next==='detection');
+  if(next==='detection') {
+    if(robotics)robotics.leave();
+    $('domain-title').textContent='Object detection';
+    $('workspace-description').textContent='Analyze images and search for changes in object detections.';
+    document.querySelectorAll('.domain').forEach(button=>{const selected=button.dataset.task==='detection';button.classList.toggle('active',selected);button.setAttribute('aria-current',selected?'page':'false');});
+    if(!detection)detection=new DetectionController({api});
+    detection.enter();updateControls();return;
+  }
+  if(detection)detection.leave();
   if(next==='robotics') {
     $('domain-title').textContent='Robosuite';
     $('workspace-description').textContent='Load a robot policy, measure task success, and explore environment variations.';
@@ -863,5 +872,5 @@ $('load-generation-dataset').addEventListener('click',async()=>{
   populatePresets('generation-dataset-preset',generationDatasetPresets);generationDatasetPresetChanged();
   populatePresets('summary-dataset-preset',summaryDatasetPresets);summaryDatasetPresetChanged();
   populatePresets('dataset-preset',datasetPresets);datasetPresetChanged();
-  const restoreRobotics=workspaceTask==='robotics';setTask('classification');if(restoreRobotics)setTask('robotics');
+  const restoreWorkspace=workspaceTask;setTask('classification');if(['robotics','detection'].includes(restoreWorkspace))setTask(restoreWorkspace);
 }catch(e){error(`Could not load the local server: ${e.message}`);}})();
