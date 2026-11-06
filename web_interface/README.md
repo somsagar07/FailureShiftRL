@@ -19,7 +19,7 @@ bash run.sh
 ```
 
 The launcher creates its own `.venv` and installs missing requirements before
-starting the server. First setup needs internet access to PyPI and the official
+starting the server, including the isolated robotics runtime on Linux. First setup needs internet access to PyPI and the official
 PyTorch wheel index. Setup detects NVIDIA hardware and selects a compatible CUDA
 build; computers without it use CPU. It checks the required imports, then opens
 a browser on this computer. Keep the terminal open. Press Ctrl+C to stop.
@@ -136,18 +136,21 @@ reported separately from the baseline-referenced severity score.
 
 ## Robosuite workspace
 
-The optional robotics runtime is installed separately from the app and Vev. It
-shares Torch/CUDA without changing their packages. On a new machine, run from
-`web_interface` (Python 3.12 or newer):
+On Linux with Python 3.12 or newer, `bash setup.sh` installs the robotics runtime
+alongside the app and Vev. `bash run.sh` checks it and repairs missing dependencies
+through setup. The packages remain isolated and share the app's Torch/CUDA.
+The current robotics dependency lock supports Linux. From `web_interface`, check
+simulation rendering separately when the machine's graphics driver is ready:
 
 ```bash
-.venv/bin/python -E setup_robotics.py --render
+.venv/bin/python -E setup_robotics.py --check --render
 .venv/bin/python -E server.py --port 8000
 ```
 
 `setup_robotics.py --check --render` checks installed dependencies and runs a real
 headless Lift/Panda episode fragment. No policy weights are downloaded during
-setup. EGL rendering still requires a working graphics driver, even when policy
+setup. The standard installer checks native policy imports without creating a
+graphics context. EGL rendering still requires a working graphics driver, even when policy
 inference uses CPU. The runtime and temporary installation directories are ignored
 by Git. The setup pins are in `requirements-robotics.txt`.
 

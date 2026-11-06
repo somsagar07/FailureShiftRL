@@ -9,7 +9,6 @@ class DetectionController {
     this.root=document.getElementById('detection-workspace');
     if(!this.root)throw new Error('Detection workspace is missing.');
     this.root.innerHTML=`
-      <p class="hint">Explore how image transformations affect a detector's predictions.</p>
       <div class="detection-layout"><div class="detection-settings">
         <h2>Model</h2><label for="detection-model-source">Model source</label>
         <select id="detection-model-source"><option value="preset">DETR ResNet-50</option><option value="huggingface">Hugging Face model</option><option value="local">Local model path</option></select>
@@ -18,20 +17,19 @@ class DetectionController {
         <div id="detection-folder-fields"><label for="detection-folder-path">Folder path</label><input id="detection-folder-path" type="text" placeholder="/path/to/images"></div>
         <div id="detection-hf-fields" hidden><label for="detection-dataset-preset">Hugging Face dataset</label><select id="detection-dataset-preset"><option value="detection-datasets/coco">COCO · everyday objects</option><option value="cvdl/oxford-pets">Oxford Pets · cats and dogs</option><option value="merve/cppe-5">CPPE-5 · protective equipment</option><option value="other">Other…</option></select><div id="detection-dataset-name-field" hidden><label for="detection-dataset-name">Dataset ID</label><input id="detection-dataset-name" type="text" placeholder="organization/dataset"></div><details class="dataset-options"><summary>Dataset options</summary><label for="detection-config">Configuration (optional)</label><input id="detection-config" type="text"><label for="detection-split">Split</label><input id="detection-split" type="text" value="val"><label for="detection-subset">Rows (optional)</label><input id="detection-subset" type="text" value="20" placeholder="e.g. [0:100]"><p class="hint">20 loads the first 20 images. Leave blank for all rows.</p><label for="detection-column">Image column (optional)</label><input id="detection-column" type="text" value="image"></details><p class="hint">Images are used for prediction consistency; dataset bounding boxes are not evaluated yet.</p></div>
         <button id="detection-load" type="button">Load images</button><p id="detection-dataset-status" class="hint" role="status">Load a dataset to begin.</p>
-        <button id="detection-analyze" class="primary" type="button" disabled>Analyze images</button>
-        <h2>Find failures</h2><p class="hint">Test photometric changes against the original detections.</p>
+        <h2>Action space</h2>
         <label class="detection-check"><input id="detection-darkness" type="checkbox" checked> Darkness <span>0.1, 0.2, 0.3, 0.4, 0.5</span></label>
         <label class="detection-check"><input id="detection-saturation" type="checkbox" checked> Saturation <span>0.5, 0.55, 0.6, 0.65, 0.7</span></label>
-        <div class="detection-numbers"><label>Episodes<input id="detection-episodes" type="number" min="1" max="10000" value="20"></label><label>Seed<input id="detection-seed" type="number" min="0" max="4294967295" value="42"></label></div>
-        <button id="detection-discover" type="button" disabled>Find failures</button><button id="detection-fine-tune" type="button" disabled title="Fine-tuning is not available for object detection yet">Fine-tune unavailable</button>
+        <button id="detection-analyze" class="primary" type="button" disabled>Analyze</button>
         <p id="detection-error" class="error" role="alert"></p>
       </div><div class="detection-results"><div class="detection-heading"><h2>Search space</h2><span id="detection-progress" role="status">No analysis yet.</span></div>
-        <p class="hint">Select an image to expand its perturbations. Drag to rotate · Shift-drag to pan · scroll to zoom.</p>
         <div class="detection-graph-controls"><button id="detection-back" type="button">Show all</button><button id="detection-fit" type="button">Fit</button><button id="detection-zoom-in" type="button">+</button><button id="detection-zoom-out" type="button">−</button></div>
         <canvas id="detection-canvas" aria-label="3D detector feature graph"></canvas><p id="detection-graph-status" class="hint">Analyze images to see the search space.</p>
         <label for="detection-action">Inspect</label><select id="detection-action" disabled><option value="original">Original image</option></select>
-        <p class="hint">Green to red: measured consistency change · gray: unmeasured. Predictions are not ground truth.</p>
-        <h3>Measured action outcomes</h3><div id="detection-records" class="detection-records"><p class="hint">No transformations measured yet.</p></div>
+        <div class="detection-legend" aria-label="Graph legend"><span>Green → red: consistency change</span><span>Gray: unmeasured</span><span>Drag: rotate · Shift-drag: pan · Scroll: zoom</span></div>
+        <div class="detection-workflow-actions"><button id="detection-find-failure" type="button" disabled aria-controls="detection-discovery-panel" aria-expanded="false">Find failure</button><button id="detection-fine-tune" type="button" disabled title="Fine-tuning is not available for object detection yet">Adapt</button></div>
+        <section id="detection-discovery-panel" class="detection-discovery-panel" hidden><h3>Find failure</h3><div class="detection-numbers"><label>Episodes<input id="detection-episodes" type="number" min="1" max="10000" value="20"></label><label>Seed<input id="detection-seed" type="number" min="0" max="4294967295" value="42"></label></div><button id="detection-discover" type="button" disabled>Start discovery</button>
+        <h3>Measured action outcomes</h3><div id="detection-records" class="detection-records"><p class="hint">No transformations measured yet.</p></div></section>
       </div><aside class="detection-inspector"><h2>Inspect</h2><div id="detection-selection" hidden><h3 id="detection-selected-name"></h3><div class="detection-images"><figure><img id="detection-original" alt="Original image with detection boxes"><figcaption id="detection-original-caption">Original detections</figcaption></figure><figure id="detection-transformed-wrap" hidden><img id="detection-transformed" alt="Transformed image with detection boxes"><figcaption>Transformed detections</figcaption></figure></div><div id="detection-details" aria-live="polite"></div></div><p id="detection-inspector-empty" class="hint">Select a point to view its images and predicted labels.</p></aside></div>`;
     this.$=id=>this.root.querySelector(`#detection-${id}`);
     this.view=new EmbeddingView(this.$('canvas'),{onSelectSample:point=>this.select(point.index),onSelectAction:node=>this.selectAction(node.id),onClear:()=>this.clearSelection()});
@@ -41,6 +39,7 @@ class DetectionController {
     this.$('load').addEventListener('click',()=>this.loadDataset());
     this.$('analyze').addEventListener('click',()=>this.analyze());
     this.$('discover').addEventListener('click',()=>this.discover());
+    this.$('find-failure').addEventListener('click',()=>{this.$('discovery-panel').hidden=!this.$('discovery-panel').hidden;this.$('find-failure').setAttribute('aria-expanded',String(!this.$('discovery-panel').hidden));});
     this.$('source').addEventListener('change',()=>{this.$('folder-fields').hidden=this.$('source').value!=='folder';this.$('hf-fields').hidden=this.$('source').value!=='huggingface';this.invalidateDataset();});
     this.$('dataset-preset').addEventListener('change',()=>this.selectDatasetPreset());
     this.$('model-source').addEventListener('change',()=>{this.$('model-custom').hidden=this.$('model-source').value==='preset';this.invalidateAnalysis();});
@@ -59,8 +58,8 @@ class DetectionController {
     this.$('subset').value='20';this.invalidateDataset();
   }
   invalidateDataset(){this.dataset=null;this.$('dataset-status').textContent='Load the edited dataset to continue.';this.invalidateAnalysis();}
-  invalidateAnalysis(){if(this.busy)return;this.analysis=null;this.discovery=null;this.selected=null;this.selectedRecord=null;this.pending=null;this.generation++;this.selectionGeneration++;this.graphAnalysis=null;this.view.reset();this.render();}
-  controls(){for(const id of ['source','folder-path','dataset-preset','dataset-name','config','split','subset','column','model-source','model-name','episodes','seed','darkness','saturation'])this.$(id).disabled=this.busy;this.$('load').disabled=this.busy;this.$('analyze').disabled=this.busy||!this.dataset;this.$('discover').disabled=this.busy||!this.analysis||(!this.$('darkness').checked&&!this.$('saturation').checked);}
+  invalidateAnalysis(){if(this.busy)return;this.analysis=null;this.discovery=null;this.selected=null;this.selectedRecord=null;this.pending=null;this.generation++;this.selectionGeneration++;this.graphAnalysis=null;this.$('discovery-panel').hidden=true;this.$('find-failure').setAttribute('aria-expanded','false');this.view.reset();this.render();}
+  controls(){for(const id of ['source','folder-path','dataset-preset','dataset-name','config','split','subset','column','model-source','model-name','episodes','seed','darkness','saturation'])this.$(id).disabled=this.busy;this.$('load').disabled=this.busy;this.$('analyze').disabled=this.busy||!this.dataset;this.$('find-failure').disabled=!this.analysis;this.$('discover').disabled=this.busy||!this.analysis||(!this.$('darkness').checked&&!this.$('saturation').checked);}
   error(message=''){this.$('error').textContent=message;}
   async loadDataset(){
     if(this.busy)return;this.error();this.dataset=null;this.invalidateAnalysis();const token=++this.generation;this.busy=true;this.controls();

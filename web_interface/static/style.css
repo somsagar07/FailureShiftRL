@@ -8,23 +8,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 [hidden] { display: none !important; }
 body { --sidebar-width: 215px; }
 body[data-sidebar-collapsed=true] { --sidebar-width: 56px; }
-aside { position: fixed; inset: 0 auto 0 0; z-index: 5; width: var(--sidebar-width); padding: 20px 10px; background: #f5f5f5; border-right: 1px solid #ddd; }
+#workspace-sidebar { position: fixed; inset: 0 auto 0 0; z-index: 5; width: var(--sidebar-width); padding: 20px 10px; background: #f5f5f5; border-right: 1px solid #ddd; }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 28px; }
 .name { font-size: 20px; font-weight: 600; white-space: nowrap; }
 #workspace-sidebar-toggle { display: flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; padding: 5px; background: transparent; border-color: transparent; }
 #workspace-sidebar-toggle:hover { background: #e4e4e4; }
 #workspace-sidebar-toggle svg { width: 21px; height: 21px; }
-aside h2 { margin: 0 10px 12px; font-size: 12px; color: #666; font-weight: 500; }
-nav { display: grid; gap: 6px; }
-nav button { display: flex; align-items: center; gap: 8px; min-width: 0; text-align: left; padding: 10px 7px; background: transparent; border-color: transparent; font-size: 12px; }
-nav button svg { flex: none; width: 20px; height: 20px; }
-nav button.active { border-color: #b7c7d8; background: #e6edf5; color: #214f7b; box-shadow: inset 2px 0 #2863a8; }
+#workspace-sidebar h2 { margin: 0 10px 12px; font-size: 12px; color: #666; font-weight: 500; }
+#workspace-sidebar nav { display: grid; gap: 6px; }
+#workspace-sidebar nav button { display: flex; align-items: center; gap: 8px; min-width: 0; text-align: left; padding: 10px 7px; background: transparent; border-color: transparent; font-size: 12px; }
+#workspace-sidebar nav button svg { flex: none; width: 20px; height: 20px; }
+#workspace-sidebar nav button.active { border-color: #b7c7d8; background: #e6edf5; color: #214f7b; box-shadow: inset 2px 0 #2863a8; }
 .domain-label { white-space: nowrap; }
-body[data-sidebar-collapsed=true] aside { padding: 20px 6px; }
+body[data-sidebar-collapsed=true] #workspace-sidebar { padding: 20px 6px; }
 body[data-sidebar-collapsed=true] .sidebar-heading { justify-content: center; }
 body[data-sidebar-collapsed=true] .name, body[data-sidebar-collapsed=true] .workspace-label, body[data-sidebar-collapsed=true] .domain-label { display: none; }
 body[data-sidebar-collapsed=true] .sidebar-toggle-chevron { transform: translate(29px,0) scale(-1,1); }
-body[data-sidebar-collapsed=true] nav button { justify-content: center; padding: 11px 0; }
+body[data-sidebar-collapsed=true] #workspace-sidebar nav button { justify-content: center; padding: 11px 0; }
 main { margin-left: var(--sidebar-width); padding: 25px 30px; }
 h1 { font-size: 23px; font-weight: 600; margin: 0 0 5px; }
 h2 { font-size: 16px; font-weight: 600; margin: 24px 0 10px; }
@@ -140,12 +140,12 @@ input[type=checkbox] { accent-color: #2863a8; }
 @media(max-width: 1250px) { .graph-layout { grid-template-columns: 1fr; } .input-pair { grid-template-columns: 1fr 1fr; gap: 18px; } }
 @media(max-width: 1050px) { main { padding: 22px; } .layout { grid-template-columns: 280px minmax(0,1fr); gap: 20px; } form { padding-right: 18px; } }
 @media(max-width: 780px) {
-  body:not([data-sidebar-collapsed=true]) aside { position: static; width: auto; border-right: 0; border-bottom: 1px solid #ddd; padding: 12px 15px; }
+  body:not([data-sidebar-collapsed=true]) #workspace-sidebar { position: static; width: auto; border-right: 0; border-bottom: 1px solid #ddd; padding: 12px 15px; }
   body:not([data-sidebar-collapsed=true]) .sidebar-heading { margin-bottom: 8px; }
   body:not([data-sidebar-collapsed=true]) .workspace-label { display: none; }
-  body:not([data-sidebar-collapsed=true]) nav { display: flex; flex-wrap: wrap; gap: 4px; }
-  body:not([data-sidebar-collapsed=true]) nav button { padding: 7px 5px; font-size: 11px; }
-  body:not([data-sidebar-collapsed=true]) nav button svg { width: 17px; height: 17px; }
+  body:not([data-sidebar-collapsed=true]) #workspace-sidebar nav { display: flex; flex-wrap: wrap; gap: 4px; }
+  body:not([data-sidebar-collapsed=true]) #workspace-sidebar nav button { padding: 7px 5px; font-size: 11px; }
+  body:not([data-sidebar-collapsed=true]) #workspace-sidebar nav button svg { width: 17px; height: 17px; }
   body:not([data-sidebar-collapsed=true]) main { margin-left: 0; }
   main { padding: 20px 15px; }
   .layout { grid-template-columns: minmax(0,1fr); }

@@ -4,12 +4,12 @@ if (typeof window === 'undefined') {
   const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),http=require('node:http'),{execFile}=require('node:child_process');
   const root=path.resolve(__dirname,'..'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'detection-ui-'));
   const server=http.createServer((req,res)=>{
-    if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end('<section id="detection-workspace"></section><script src="/embedding-view.js"></script><script src="/detection-controller.js"></script><script src="/test.js"></script><script>runDetectionTests()</script>');return;}
+    if(req.url==='/'){const html=fs.readFileSync(path.join(root,'static/index.html'),'utf8'),sidebar=html.match(/<aside id="workspace-sidebar"[\s\S]*?<\/aside>/)[0];res.setHeader('Content-Type','text/html');res.end('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/detection.css"><body data-sidebar-collapsed="false">'+sidebar+'<main><section id="detection-workspace"></section></main><script src="/embedding-view.js"></script><script src="/detection-controller.js"></script><script src="/test.js"></script><script>runDetectionTests()</script>');return;}
     const file=req.url==='/test.js'?__filename:path.join(root,'static',path.basename(req.url));
     if(!fs.existsSync(file)){res.writeHead(404);res.end();return;}
-    res.setHeader('Content-Type','text/javascript');res.end(fs.readFileSync(file));
+    res.setHeader('Content-Type',file.endsWith('.css')?'text/css':'text/javascript');res.end(fs.readFileSync(file));
   });
-  server.listen(0,'127.0.0.1',()=>execFile(process.env.CHROME_BIN||'google-chrome',['--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',`--user-data-dir=${profile}`,'--dump-dom','--virtual-time-budget=10000',`http://127.0.0.1:${server.address().port}/`],{timeout:45000},(error,stdout)=>{
+  server.listen(0,'127.0.0.1',()=>execFile(process.env.CHROME_BIN||'google-chrome',['--headless','--no-sandbox','--disable-gpu','--disable-dev-shm-usage',`--window-size=${process.env.TEST_VIEWPORT||'1920,1080'}`,`--user-data-dir=${profile}`,'--dump-dom','--virtual-time-budget=10000',`http://127.0.0.1:${server.address().port}/`],{timeout:45000},(error,stdout)=>{
     try{if(error)throw error;const match=stdout.match(/<pre id="detection-test-result"[^>]*>([\s\S]*?)<\/pre>/);if(!match)throw Error('No browser result');const report=JSON.parse(match[1].replaceAll('&quot;','"').replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&amp;','&'));console.log(JSON.stringify(report,null,2));if(report.error)process.exitCode=1;}
     catch(failure){console.error(failure);process.exitCode=1;}finally{server.close();fs.rmSync(profile,{recursive:true,force:true});}
   }));
@@ -27,10 +27,24 @@ if (typeof window === 'undefined') {
   };
   try{
     const c=new DetectionController({api});c.enter();
+    for(const collapsed of ['false','true']){
+      document.body.dataset.sidebarCollapsed=collapsed;
+      const sidebar=document.getElementById('workspace-sidebar'),inspector=document.querySelector('.detection-inspector');
+      assert(getComputedStyle(inspector).position!=='fixed','Inspector must stay in its workspace, not cover the sidebar');
+      for(const button of sidebar.querySelectorAll('.domain')){
+        const box=button.getBoundingClientRect(),hit=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
+        assert(hit&&(button===hit||button.contains(hit)),`Workspace ${button.dataset.task} remains visible and clickable`);
+      }
+      assert(inspector.getBoundingClientRect().x>=sidebar.getBoundingClientRect().right||getComputedStyle(sidebar).position==='static','Inspector stays beside or below navigation');
+      assert(document.documentElement.scrollWidth<=innerWidth+1,'Workspace fits the viewport');
+    }
+    document.body.dataset.sidebarCollapsed='false';passed.push('Sidebar remains accessible with an expanded or collapsed workspace bar');
     $('folder-path').value='/tmp/images';await c.loadDataset();
     assert(calls[0].body.source==='folder'&&calls[0].body.path==='/tmp/images','Folder request');assert(calls.some(c=>c.path==='/api/datasets/data'),'Dataset status polled');
     await c.analyze();const a=calls.find(c=>c.path==='/api/detection/analyze').body;
     assert(a.dataset_id==='data'&&a.model.name==='facebook/detr-resnet-50'&&a.device==='auto','Analysis uses loaded dataset and model');
+    assert(!$('find-failure').disabled&&$('discovery-panel').hidden,'Search settings stay collapsed until Find failure is clicked');
+    $('find-failure').click();assert(!$('discovery-panel').hidden,'Find failure opens search settings below the graph');
     assert(c.view.points.length===2,'Analysis points available in interactive graph');
     await c.select(1);assert(c.view.nodes.length===1,'Selecting an image expands action nodes');assert($('original').getAttribute('src').includes('/inspection/images/1/original'),'Selected image shows original detections');assert($('details').textContent.includes('cat'),'Predicted labels shown');
     await c.selectAction(1);assert($('transformed').getAttribute('src').includes('/inspection/images/1/action-1'),'Selecting a node displays its transformed image');

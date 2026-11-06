@@ -324,4 +324,14 @@ if __name__ == '__main__':
             status = 1
             if not args.quiet:
                 print(f'Vev runtime check failed: {exc}. Run bash setup.sh from web_interface.')
+    if status == 0 and sys.platform.startswith('linux'):
+        command = [sys.executable, '-E', str(Path(__file__).with_name('setup_robotics.py')), '--check']
+        if args.quiet:
+            command.append('--quiet')
+        try:
+            status = subprocess.run(command, timeout=210).returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            status = 1
+            if not args.quiet:
+                print(f'Robotics runtime check failed: {exc}. Run bash setup.sh from web_interface.')
     raise SystemExit(status)

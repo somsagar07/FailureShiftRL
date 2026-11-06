@@ -18,7 +18,7 @@ for argument in "$@"; do
     --dry-run) dry_run=true ;;
     --help|-h)
       printf 'Usage: bash setup.sh [--auto|--cuda|--cpu] [--dry-run]\n\n'
-      printf 'Default: detect NVIDIA hardware and install a compatible CUDA build; otherwise use CPU.\n'
+      printf 'Default: install all workspace dependencies; detect CUDA or use CPU. Robotics is included on Linux.\n'
       printf '  --cuda     Require working CUDA, including a verified GPU tensor operation.\n'
       printf '  --cpu      Install/retain CPU-only PyTorch, including on NVIDIA machines.\n'
       printf '  --dry-run  Show the selected build without changing the environment.\n'
@@ -43,7 +43,7 @@ if [[ "$dry_run" == true ]]; then
   if [[ "$vision_action" != keep ]]; then
     printf 'Would %s %s from %s, preserving %s.\n' "$vision_action" "$vision_requirement" "$vision_index" "$torch_pin"
   fi
-  printf 'Would install app requirements, run pip check, install the isolated Vev runtime, and verify the %s runtime.\n' "$backend"
+  printf 'Would install app requirements, run pip check, install isolated Vev and (on Linux) robotics runtimes, and verify the %s runtime.\n' "$backend"
   exit 0
 fi
 
@@ -84,6 +84,11 @@ if ! .venv/bin/python -I -m pip install "${pip_options[@]}" --constraint "$const
 fi
 .venv/bin/python -I -m pip check
 .venv/bin/python -E setup_vev.py
+if .venv/bin/python -I -c 'import sys; raise SystemExit(0 if sys.platform.startswith("linux") else 1)'; then
+  .venv/bin/python -E setup_robotics.py
+else
+  printf '\nThe robotics dependency lock currently supports Linux; other workspaces remain available.\n'
+fi
 check_args=()
 if [[ "$backend" == cuda ]]; then
   check_args+=(--require-cuda)
